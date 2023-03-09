@@ -278,11 +278,37 @@ def collate_fn_dense(batch):
 def _collate_fn_seq(batch):
     batch_data = {}
     batch_data['batch_size'] = len(batch)
+    batch_data['X'] = None
     batch_data['ind'] = torch.from_numpy(np.vstack([item[0] for item in batch]))
     batch_data['mask'] = torch.from_numpy(np.vstack([item[1] for item in batch]))
-    batch_data['ip_ind'] = batch_data['ind']
-    batch_data['ip_mask'] = batch_data['mask']
     return batch_data
+
+
+def _collate_fn_ext(batch, max_len):
+    batch_labels = []
+    random_pos_indices = []
+    for item in batch:
+        batch_labels.append(item[2])
+        random_pos_indices.append(item[3])
+
+    batch_size = len(batch_labels)
+
+    ind = np.vstack([x[0] for x in batch]) 
+    mask = np.vstack([x[1] for x in batch])
+    batch_selection = np.zeros((batch_size, batch_size), dtype=np.float32)     
+
+    random_pos_indices_set = set(random_pos_indices)
+    random_pos_indices = np.array(random_pos_indices, dtype=np.int32)
+    
+
+    for (i, item) in enumerate(batch_labels):
+        intersection = set(item).intersection(random_pos_indices_set)
+        result = np.zeros(batch_size, dtype=np.float32)
+        for idx in intersection:
+            result += (idx == random_pos_indices)   
+        batch_selection[i] = result  
+
+    return ind, mask, random_pos_indices, batch_selection
 
 
 def _collate_fn(batch, max_len):
@@ -366,6 +392,24 @@ def collate_fn_seq_siamese(batch, max_len=32):
     batch_data['ip_mask'] = torch.from_numpy(ip_mask)
     batch_data['op_ind'] = torch.from_numpy(op_ind)
     batch_data['op_mask'] = torch.from_numpy(op_mask)
+    batch_data['Y'] = torch.from_numpy(batch_selection)
+    batch_data['Y_mask'] = None
+    
+    return batch_data
+
+
+def collate_fn_seq_xc(batch, max_len=32):
+    batch_data = {}
+    batch_size = len(batch)
+    batch_data['batch_size'] = torch.tensor(batch_size, dtype=torch.int32)
+    
+    ind, mask, lbl_indices, batch_selection = _collate_fn_ext(batch, max_len)
+    ind, mask = clip_batch_lengths(ind, mask)
+
+    batch_data['indices'] = torch.LongTensor([item[-1] for item in batch])
+    batch_data['ind'] = torch.from_numpy(ind)
+    batch_data['mask'] = torch.from_numpy(mask)
+    batch_data['Y_s'] = torch.LongTensor(lbl_indices)
     batch_data['Y'] = torch.from_numpy(batch_selection)
     batch_data['Y_mask'] = None
     

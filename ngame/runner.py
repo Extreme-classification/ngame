@@ -138,7 +138,6 @@ def run_ngame(work_dir, pipeline, version, seed, config):
     _train_time, _ = main(args)
     train_time += _train_time
 
-    exit()
 
     # train final representation and extreme classifiers
     _args.update(config['extreme'])
@@ -157,6 +156,9 @@ def run_ngame(work_dir, pipeline, version, seed, config):
     _train_time, _model_size = main(args)
     train_time += _train_time
     model_size += _model_size
+
+    exit()
+
 
     # predict using extreme classifiers
     args.pred_fname = 'tst_predictions'

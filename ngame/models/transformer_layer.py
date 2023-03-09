@@ -41,11 +41,12 @@ class BaseTransformer(torch.nn.Module):
             self.construct_pooler(pooler, **kwargs), \
                 self.construct_normalizer(normalize)
 
-    def encode(self, ids, mask):
+    def encode(self, x):
+        ids, mask = x
         return self.normalize(self.pooler(self.transform(ids, mask), mask))
 
-    def forward(self, ids, mask):
-        return self.encode(ids, mask)
+    def forward(self, x):
+        return self.encode(x)
 
     def construct_normalizer(self, normalize):
         if normalize:
@@ -117,7 +118,8 @@ class STransformer(BaseTransformer):
         else:
             return transformer
 
-    def encode(self, ids, mask):
+    def encode(self, x):
+        ids, mask = x
         out = self.transform({'input_ids': ids, 'attention_mask': mask})
         return self.normalize(out['sentence_embedding'])
 

@@ -1,10 +1,9 @@
-import os
 import argparse
-import numpy as np
 import torch
-from models.network import Network
-from libs.model import ModelSiamese
+from models.network import DeepXMLSS, SiameseXML
+from libs.model import ModelSiamese, ModelSShortlist
 import libs.loss as loss
+import os
 
 
 def get_linear_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps, last_epoch=-1):
@@ -37,18 +36,27 @@ def get_linear_schedule_with_warmup(optimizer, num_warmup_steps, num_training_st
 
 
 def construct_optimizer(params, net):
-    return torch.optim.AdamW(
-        net.parameters(),
-        lr=params.learning_rate,
-        eps=1e-06,
-        weight_decay=params.weight_decay)
+    if params.optim == 'Adam':
+        return torch.optim.SparseAdam(
+            list(net.classifier.parameters()),
+            lr=params.learning_rate,
+            eps=1e-06)
+    elif params.optim == 'AdamW':
+        return torch.optim.AdamW(
+            net.parameters(),
+            lr=params.learning_rate,
+            eps=1e-06,
+            weight_decay=params.weight_decay)
+    else:
+        raise NotImplementedError("")
 
 
 def construct_schedular(params, optimizer):
     return get_linear_schedule_with_warmup(
         optimizer=optimizer,
-        num_warmup_steps=100,
-        num_training_steps=params.num_epochs*(params.num_points/params.batch_size))
+        num_warmup_steps=params.warmup_steps,
+        num_training_steps=params.num_epochs*(
+            params.num_points/params.batch_size))
 
 
 def construct_loss(params, pos_weight=1.0):
@@ -75,9 +83,11 @@ def construct_loss(params, pos_weight=1.0):
             pad_ind=_pad_ind,
             pos_weight=None)
     elif params.loss == 'triplet_margin_ohnm':
-        print("Using triplet loss, with margin: ", params.margin)
         return loss.TripletMarginLossOHNM(
             reduction=_reduction,
+            apply_softmax=params.loss_agressive,
+            tau=0.1,
+            k=params.loss_num_negatives,
             margin=params.margin)
     elif params.loss == 'hinge_contrastive':
         return loss.HingeContrastiveLoss(
@@ -112,20 +122,78 @@ def train(model, args):
         'label_fname': args.val_label_fname}
 
     output = model.fit(
-        args.data_dir,
-        args.dataset,
-        trn_fname,
-        val_fname,
+        data_dir=args.data_dir,
+        dataset=args.dataset,
+        trn_fname=trn_fname,
+        val_fname=val_fname,
         batch_type='doc',
         validate=True,
+        result_dir=args.result_dir,
+        model_dir=args.model_dir,
+        sampling_params=args,
+        max_len=args.max_length,
+        validate_after=args.validate_after,
         num_epochs=args.num_epochs,
         batch_size=args.batch_size)
-    
+    model.save(args.model_dir, args.model_fname)
     return output
 
 
+def construct_network(args):
+    if args.network_type == 'siamese':
+        net = SiameseXML(args)
+    elif args.network_type == 'sshortlist':
+        print("With sshortlist...")
+        net = DeepXMLSS(args)
+    else:
+        raise NotImplementedError("")
+
+    if args.init == 'intermediate':
+        print("Loading intermediate representation.")
+        net.load_intermediate_model(
+            os.path.join(os.path.dirname(args.model_dir), "Z.pkl"))
+    elif args.init == 'token_embeddings':
+        print("Loading pre-trained token embeddings.")
+        embeddings = load_emeddings(args)
+        net.initialize(embeddings)
+        del embeddings
+    elif args.init == 'auto':
+        print("Automatic initialization.")
+    else:  # trust the random init
+        print("Random initialization.")
+    return net
+
+
+def construct_model(args, net, loss, optimizer, schedular):
+    if args.model_type == 'siamese':
+        return ModelSiamese(
+            net=net,
+            criterion=loss,
+            optimizer=optimizer,
+            schedular=schedular,
+            model_dir=args.model_dir,
+            result_dir=args.result_dir,
+            feature_type=args.feature_type,
+            use_amp=args.use_amp)
+    elif args.model_type == 'sshortlist':
+        return ModelSShortlist(
+            net=net,
+            criterion=loss,
+            optimizer=optimizer,
+            schedular=schedular,
+            model_dir=args.model_dir,
+            result_dir=args.result_dir,
+            feature_type=args.feature_type,
+            use_amp=args.use_amp)
+    else:
+        raise NotImplementedError("")
+
+
 def main(args):
-    net = Network('msmarco-distilbert-base-v4')
+    print(args)
+    args.label_padding_index = args.num_labels
+    net = construct_network(args)
+    print(net)
     net.to("cuda")
     model_dir = args.model_dir
     result_dir = args.result_dir
@@ -133,8 +201,11 @@ def main(args):
         loss = construct_loss(args)
         optimizer = construct_optimizer(args, net)
         schedular = construct_schedular(args, optimizer)
-        model = ModelSiamese(net, loss, optimizer, schedular, model_dir, result_dir, feature_type=args.feature_type)
+        model = construct_model(args, net, loss, optimizer, schedular)
         output = train(model, args)
+        if args.save_intermediate:
+            net.save_intermediate_model(
+                os.path.join(os.path.dirname(args.model_dir), "Z.pkl"))
     elif args.mode == 'predict':
         pass
     else:
@@ -170,8 +241,7 @@ if __name__ == "__main__":
     parser.add_argument("--tokenizer-type", type=str, help="Tokenizer to use", default="bert-base-uncased")
     parser.add_argument("--encoder-name", type=str, help="Encoder to use", default="msmarco-distilbert-base-v3")
     parser.add_argument("--transform-dim", type=int, help="Transform bert embeddings to size", default=-1)
-
-
+    parser.add_argument("--share_weights", type=bool, help="", default=True)
     parser.add_argument("--cl-size", type=int, help="cluster size", default=32)
     parser.add_argument("--cl-start", type=int, help="", default=999999)
     parser.add_argument("--cl-update", type=int, help="", default=5)

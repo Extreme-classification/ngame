@@ -1,0 +1,38 @@
+{
+    "representation_dims": "#ARGS.embedding_dims;",
+    "encoder": {
+        "order": ["stransformer"],
+        "stransformer": {
+            "transformer": "#ARGS.encoder_name;",
+            "embedding_dims": "#ARGS.embedding_dims;",
+            "dropout": 0
+        }
+    },
+
+    "encoder_lbl": {
+        "order": ["stransformer"],
+        "stransformer": {
+            "transformer": "#ARGS.encoder_name;",
+            "embedding_dims": "#ARGS.embedding_dims;",
+            "dropout": 0
+        }
+    },
+
+    "transform": {
+        "order": ["identity"],
+        "identity": {}
+    },
+
+    "transform_doc": {
+        "order": ["dropout"],
+        "dropout": {
+            "p": 0.5
+        }
+    },
+
+    "transform_lbl": {
+        "order": ["identity"],
+        "identity": {}
+    }
+}
+ 

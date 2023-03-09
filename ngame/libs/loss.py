@@ -259,13 +259,15 @@ class TripletMarginLossOHNM(_Loss):
         promotes hard negatives using softmax
     """
 
-    def __init__(self, reduction='mean', margin=0.8, k=3, apply_softmax=False):
+    def __init__(self, reduction='mean', margin=0.8, k=3, apply_softmax=False, tau=0.1, num_violators=False):
         super(TripletMarginLossOHNM, self).__init__(reduction=reduction)
         self.margin = margin
         self.k = k
+        self.tau = tau
+        self.num_violators = num_violators
         self.apply_softmax = apply_softmax
 
-    def forward(self, input, target, mask):
+    def forward(self, input, target, mask=None):
         """
         Arguments:
         ---------
@@ -283,17 +285,20 @@ class TripletMarginLossOHNM(_Loss):
             dimension is defined based on reduction
         """
         sim_p = torch.diagonal(input).view(-1, 1)
-        similarities = torch.min(input, 1-target)
+        similarities = torch.where(target == 0, input, torch.full_like(input, -10))
         _, indices = torch.topk(similarities, largest=True, dim=1, k=self.k)
         sim_n = input.gather(1, indices)
         loss = torch.max(torch.zeros_like(sim_p), sim_n - sim_p + self.margin)
         mask = loss != 0 #torch.where(loss != 0, torch.ones_like(loss), torch.zeros_like(loss))
         if self.apply_softmax:
-            prob = torch.softmax(sim_n * mask, dim=1)
+            prob = torch.softmax(sim_n/self.tau * mask, dim=1)
             loss = loss * prob
-        # loss = self._mask_at_pad(loss)
-        # loss = self._mask(loss, mask)
-        return self._reduce(loss)
+        reduced_loss = self._reduce(loss)
+        if self.num_violators:
+            nnz = torch.sum((loss > 0), axis=1).float().mean()
+            return reduced_loss, nnz
+        else:
+            return reduced_loss
 
 
 class ProbContrastiveLoss(_Loss):

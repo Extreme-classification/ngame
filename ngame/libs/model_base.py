@@ -43,6 +43,7 @@ class ModelBase(object):
         result_dir,
         freeze_intermediate=False,
         feature_type='sparse',
+        use_amp=False,
         *args,
         **kwargs
     ):
@@ -63,6 +64,9 @@ class ModelBase(object):
         self.logger = self.get_logger(name=self.model_fname)
         self.devices = -1 #self._create_devices(params.devices)
         self.tracking = Tracking()
+        self.scaler = None
+        if use_amp:
+            self.scaler = torch.cuda.amp.GradScaler()
 
     def setup_devices(self):
         pass
@@ -206,21 +210,14 @@ class ModelBase(object):
         logger.setLevel(level=level)
         return logger
 
-    def _compute_loss_one(self, _pred, _true):
+    def _compute_loss(self, _pred, batch_data, weightage=1.0):
         """
             Compute loss for one classifier
         """
-        _true = _true.to(_pred.get_device())
+        _true = batch_data['Y'].to(_pred.get_device())
         return self.criterion(_pred, _true).to(self.devices[-1])
 
-    def _compute_loss(self, out_ans, batch_data, weightage=1.0):
-        """
-            Compute loss for one classifier
-        """
-        return self._compute_loss_one(out_ans, batch_data['Y'])
-
-    def _step(self, data_loader, batch_div=False,
-              precomputed_intermediate=False):
+    def _step_amp(self, data_loader, precomputed_intermediate=False):
         """
         Training step (one pass over dataset)
 
@@ -240,14 +237,47 @@ class ModelBase(object):
         loss: float
             mean loss over the train set
         """
-        def grad_norm(model):
-            total_norm = 0
-            parameters = [p for p in model.parameters() if p.grad is not None and p.requires_grad]
-            for p in parameters:
-                param_norm = p.grad.detach().data.norm(2)
-                total_norm += param_norm.item() ** 2
-            total_norm = total_norm ** 0.5
-            return total_norm
+        self.net.train()
+        torch.set_grad_enabled(True)
+        mean_loss = 0
+        pbar = tqdm(data_loader)
+        for batch_data in pbar:
+            self.optimizer.zero_grad()
+            batch_size = batch_data['batch_size']
+            with torch.cuda.amp.autocast():
+                out_ans = self.net.forward(batch_data, precomputed_intermediate)
+                loss = self._compute_loss(out_ans, batch_data)
+            mean_loss += loss.item()*batch_size
+            self.scaler.scale(loss).backward()
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            self.schedular.step()
+            pbar.set_description(
+                f"loss: {loss.item():.5f}")
+            del batch_data
+        return mean_loss / data_loader.dataset.num_instances
+
+
+    def _step(self, data_loader, precomputed_intermediate=False):
+        """
+        Training step (one pass over dataset)
+
+        Arguments
+        ---------
+        data_loader: DataLoader
+            data loader over train dataset
+        batch_div: boolean, optional, default=False
+            divide the loss with batch size?
+            * useful when loss is sum over instances and labels
+        precomputed_intermediate: boolean, optional, default=False
+            if precomputed intermediate features are already available
+            * avoid recomputation of intermediate features
+
+        Returns
+        -------
+        loss: float
+            mean loss over the train set
+        """
         self.net.train()
         torch.set_grad_enabled(True)
         mean_loss = 0
@@ -257,9 +287,6 @@ class ModelBase(object):
             batch_size = batch_data['batch_size']
             out_ans = self.net.forward(batch_data, precomputed_intermediate)
             loss = self._compute_loss(out_ans, batch_data)
-            # If loss is sum and average over samples is required
-            if batch_div:
-                loss = loss/batch_size
             mean_loss += loss.item()*batch_size
             loss.backward()
             self.optimizer.step()
@@ -733,10 +760,12 @@ class ModelBase(object):
                 dtype=_dtype)
         count = 0
         for batch_data in tqdm(data_loader):
-            #import pdb; pdb.set_trace()
             batch_size = batch_data['batch_size']
             out_ans = encoder(
-                batch_data, use_intermediate)
+                batch_data['X'],
+                batch_data['ind'],
+                batch_data['mask'],
+                use_intermediate)
             embeddings[count:count+batch_size,
                        :] = out_ans.detach().cpu().numpy()
             count += batch_size

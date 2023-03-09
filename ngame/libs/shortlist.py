@@ -79,13 +79,22 @@ class ShortlistMIPS(Shortlist):
 
 
 class ClusteringIndex(object):
-    def __init__(self, num_instances, num_clusters, num_threads):
+    def __init__(self, num_instances, num_clusters, num_threads, curr_steps):
         self.num_instances = num_instances
         self.num_clusters = num_clusters
         self.num_threads = num_threads
         self.index = None
+        self.curr_steps = curr_steps
+        self.step = 0
         self.avg_size = 1
         self.random_clustering()
+
+    def update_state(self):
+        if sum([i-1==self.step for i in self.curr_steps]) > 0:
+            print(f"Doubling cluster size at: {self.step} to {2*self.num_instances/self.num_clusters}")
+            # larger clusters => harder negatives
+            self.num_clusters /= 2
+        self.step += 1
 
     def random_clustering(self):
         self.index = []
@@ -96,7 +105,7 @@ class ClusteringIndex(object):
         assert self.num_instances == len(X)
         _nc = self.num_clusters if num_clusters is None else num_clusters
         self.index, _ = cluster_balance(
-            X=X.copy(), 
+            X=X.astype('float32'), 
             clusters=[np.arange(len(X), dtype='int')],
             num_clusters=_nc,
             splitter=b_kmeans_dense,
