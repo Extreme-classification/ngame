@@ -3,7 +3,9 @@ import torch
 from models.network import DeepXMLSS, SiameseXML
 from libs.model import ModelSiamese, ModelSShortlist
 import libs.loss as loss
+import libs.shortlist as shortlist
 import os
+import libs.utils as utils
 
 
 def get_linear_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps, last_epoch=-1):
@@ -139,6 +141,33 @@ def train(model, args):
     return output
 
 
+def inference(model, args):
+    fname = {
+        'feature_fname': args.tst_feat_fname,
+        'label_feature_fname': args.lbl_feat_fname,
+        'label_fname': args.tst_label_fname}
+
+    predicted_labels, prediction_time, avg_prediction_time = model.predict(
+        data_dir=args.data_dir,
+        dataset=args.dataset,
+        fname=fname,
+        result_dir=args.result_dir,
+        model_dir=args.model_dir,
+        max_len=args.max_length,
+        filter_map=args.filter_map,
+        batch_size=args.batch_size)
+    model.save(args.model_dir, args.model_fname)
+    utils.save_predictions(
+        preds=predicted_labels,
+        result_dir=args.result_dir,
+        valid_labels=None,
+        num_samples=None,
+        num_labels=None,
+        prefix=args.pred_fname,
+        get_fnames=["knn", "clf"])
+    return predicted_labels, prediction_time, avg_prediction_time
+
+
 def construct_network(args):
     if args.network_type == 'siamese':
         net = SiameseXML(args)
@@ -164,7 +193,7 @@ def construct_network(args):
     return net
 
 
-def construct_model(args, net, loss, optimizer, schedular):
+def construct_model(args, net, loss, optimizer, schedular, shortlister):
     if args.model_type == 'siamese':
         return ModelSiamese(
             net=net,
@@ -184,29 +213,69 @@ def construct_model(args, net, loss, optimizer, schedular):
             model_dir=args.model_dir,
             result_dir=args.result_dir,
             feature_type=args.feature_type,
+            shortlister=shortlister,
             use_amp=args.use_amp)
     else:
         raise NotImplementedError("")
 
 
+def construct_shortlister(args):
+    """Construct shortlister
+    * used during predictions
+
+    Arguments:
+    ----------
+    args: NameSpace
+        parameters of the model with following inference methods
+        * mips
+          predict using a single nearest neighbor structure learned
+          over label classifiers
+        * dual_mips
+          predict using two nearest neighbor structures learned
+          over label embeddings and label classifiers
+    """
+    if args.inference_method == 'mips':  # Negative Sampling
+        shortlister = shortlist.ShortlistMIPS(
+            method=args.ann_method,
+            num_neighbours=args.num_nbrs,
+            M=args.M,
+            efC=args.efC,
+            efS=args.efS,
+            num_threads=args.ann_threads)
+    elif args.inference_method == 'dual_mips':
+        shortlister = shortlist.DualShortlistMIPS(
+            method=args.ann_method,
+            num_neighbours=args.num_nbrs,
+            M=args.M,
+            efC=args.efC,
+            efS=args.efS,
+            num_threads=args.ann_threads)
+    else:
+        shortlister = None
+    return shortlister
+
+
 def main(args):
-    print(args)
     args.label_padding_index = args.num_labels
     net = construct_network(args)
-    print(net)
+    print("Model parameters: ", args)
     net.to("cuda")
-    model_dir = args.model_dir
-    result_dir = args.result_dir
+    shortlister = construct_shortlister(args)
     if args.mode == 'train':
         loss = construct_loss(args)
         optimizer = construct_optimizer(args, net)
         schedular = construct_schedular(args, optimizer)
-        model = construct_model(args, net, loss, optimizer, schedular)
+        model = construct_model(
+            args, net, loss, optimizer, schedular, shortlister)
         output = train(model, args)
         if args.save_intermediate:
             net.save_intermediate_model(
                 os.path.join(os.path.dirname(args.model_dir), "Z.pkl"))
     elif args.mode == 'predict':
+        model = construct_model(args, net, None, None, None, shortlister)
+        model.load(args.model_dir, args.model_fname)
+        output = inference(model, args)
+    elif args.mode == 'encode':
         pass
     else:
         raise NotImplementedError("")
@@ -214,39 +283,4 @@ def main(args):
 
 
 if __name__ == "__main__":
-
-    parser = argparse.ArgumentParser()
-
-
-    parser.add_argument("--num_epochs", type=int, help="The number of epochs to run for", default=300)
-    parser.add_argument("--num_steps", type=int, help="The number of data points", default=294805)
-    parser.add_argument("--batch_size", type=int, help="The batch size", default=1600)
-    parser.add_argument("--margin", type=float, help="Margin below which negative labels are not penalized", default=0.3)
-    parser.add_argument("-A", type=float, help="The propensity factor A" , default=0.55)
-    parser.add_argument("-B", type=float, help="The propensity factor B", default=1.5)
-    parser.add_argument("--learning_rate", type=float, help="learning rate", default=0.0002)
-    parser.add_argument("--momentum", type=float, help="learning rate", default=0)
-    parser.add_argument("--weight_decay", type=float, help="learning rate", default=0.01)
-    parser.add_argument("--save-model", type=int, help="Should the model be saved", default=0)
-    parser.add_argument("--dataset", type=str, required=True)
-    parser.add_argument("--data-dir", type=str, required=True, help="Data directory path - with {trn,tst}_X.txt, {trn,tst}_X_Y.txt and Y.txt")
-    parser.add_argument("--file-type", type=str, required=False, help="File type txt/npz", default="txt")
-    parser.add_argument("--version", type=str, help="Version of the run", default="0")
-    parser.add_argument("--filter-labels-test", type=int, help="Whether to filter labels at validation time", default=1)
-    parser.add_argument("--eval-interval", type=int, help="The numbers of epochs between acc evalulation", default=30)
-    parser.add_argument("--loss", type=str, help="Squared or sqrt", default='triplet_margin_ohnm')
-    parser.add_argument("--max-length", type=int, help="Max length for tokenizer", default=32)
-    parser.add_argument("--k", type=int, help="Number of negatives to use", default=5)
-    parser.add_argument("--num-negatives", type=int, help="Number of negatives to use", default=3)
-    parser.add_argument("--tokenizer-type", type=str, help="Tokenizer to use", default="bert-base-uncased")
-    parser.add_argument("--encoder-name", type=str, help="Encoder to use", default="msmarco-distilbert-base-v3")
-    parser.add_argument("--transform-dim", type=int, help="Transform bert embeddings to size", default=-1)
-    parser.add_argument("--share_weights", type=bool, help="", default=True)
-    parser.add_argument("--cl-size", type=int, help="cluster size", default=32)
-    parser.add_argument("--cl-start", type=int, help="", default=999999)
-    parser.add_argument("--cl-update", type=int, help="", default=5)
-
-
-
-    args = parser.parse_args()
-    main(args)
+    pass

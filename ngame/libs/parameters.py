@@ -91,7 +91,7 @@ class Parameters(ParametersBase):
         self.parser.add_argument(
             '--ann_method',
             dest='ann_method',
-            default='hnsw',
+            default='hnswlib',
             action='store',
             type=str,
             help='Approximate nearest neighbor method')

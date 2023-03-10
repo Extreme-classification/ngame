@@ -47,7 +47,8 @@
         "sampling_curr_epochs": [10, 20, 25, 50, 75, 100, 125, 150, 200],
         "sampling_refresh_interval": 5,
         "sampling_init_cluster_size": 1,
-        "sampling_threads": 8 
+        "sampling_threads": 8 ,
+        "inference_method": null
     },
     "extreme": {
         "num_epochs": 100,
@@ -69,9 +70,10 @@
         "validate_after": 5,
         "efS": 300,
         "M": 100,
-        "num_nbrs": 500,
+        "num_nbrs": 300,
         "margin": 0.2,
         "ann_threads": 12,
+        "ann_method": "hnswlib",
         "beta": 0.5,
         "surrogate_mapping": null,
         "freeze_intermediate": true,
@@ -82,7 +84,7 @@
         "init": "intermediate",
         "use_shortlist": true,
         "use_intermediate_for_shorty": true,
-        "save_intermediate": false
-
+        "save_intermediate": false,
+        "inference_method": "dual_mips"
     }
 }

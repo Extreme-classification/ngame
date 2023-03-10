@@ -307,11 +307,10 @@ class ModelSiamese(ModelBase):
         self.tracking.save(os.path.join(self.result_dir, 'training_statistics.pkl'))
         self.logger.info(
             "Training time: {:.2f} sec, Validation time: {:.2f} sec, "
-            "Shortlist time: {:.2f} sec, Model size: {:.2f} MB".format(
+            "Shortlist time: {:.2f} sec".format(
                 self.tracking.train_time,
                 self.tracking.validation_time,
-                self.tracking.shortlist_time,
-                self.model_size))
+                self.tracking.shortlist_time))
 
     def fit(
         self,
@@ -336,8 +335,12 @@ class ModelSiamese(ModelBase):
         batch_type='doc',
         max_len=32,
         feature_type='sparse',
+        result_dir="",
         *args, **kwargs
     ):
+        self.logger.addHandler(
+            logging.FileHandler(os.path.join(result_dir, 'log_train.txt')))
+        self.logger.info(f"Net: {self.net}")
         self.logger.info("Loading training data.")
         train_dataset = self._create_dataset(
             data_dir=os.path.join(data_dir, dataset),
@@ -350,8 +353,7 @@ class ModelSiamese(ModelBase):
             sampling_params=sampling_params,
             _type='embedding',
             max_len=max_len,
-            batch_type=batch_type,
-            shorty=self.shorty
+            batch_type=batch_type
             )
         train_loader = self._create_weighted_data_loader(
             train_dataset,
@@ -378,8 +380,7 @@ class ModelSiamese(ModelBase):
                 size_shortlist=1,
                 _type='embedding',
                 max_len=max_len,
-                batch_type='doc',
-                shorty=self.shorty
+                batch_type='doc'
                 )
             validation_loader = self._create_data_loader(
                 validation_dataset,
@@ -515,7 +516,7 @@ class ModelSShortlist(ModelBase):
         freeze_intermediate=False,
         feature_type='sparse',
         use_amp=False,
-        shorty=None
+        shortlister=None
     ):
         super().__init__(
             net=net,
@@ -528,9 +529,8 @@ class ModelSShortlist(ModelBase):
             use_amp=use_amp,
             feature_type=feature_type,
         )
-        self.shorty = shorty
+        self.shortlister = shortlister
         self.memory_bank = None
-
 
     def _compute_loss_one(self, _pred, _true, _mask):
         """
@@ -548,13 +548,12 @@ class ModelSShortlist(ModelBase):
         return self._compute_loss_one(
             out_ans, batch_data['Y'], batch_data['Y_mask'])
 
-    def _combine_scores(self, logit, sim, beta):
+    def _combine_scores(self, score_knn, score_clf, beta):
         """
         Combine scores of label classifier and shortlist
-        score = beta*sigmoid(logit) + (1-beta)*sigmoid(sim)
+        score = beta*score_knn + (1-beta)*score_clf
         """
-        return beta*sigmoid(logit, copy=True) \
-            + (1-beta)*sigmoid(sim, copy=True)
+        return beta*score_knn + (1-beta)*score_clf
 
     def _strip_padding_label(self, mat, num_labels):
         stripped_vals = {}
@@ -848,16 +847,6 @@ class ModelSShortlist(ModelBase):
             self.update_order(train_loader)
             train_loader.dataset.update_state()
         self.save_checkpoint(self.model_dir, epoch+1)
-        self.tracking.save(os.path.join(self.result_dir, 'training_statistics.pkl'))
-        self.logger.info(
-            "Training time: {:.2f} sec, Validation time: {:.2f} sec, "
-            "Shortlist time: {:.2f} sec, Model size: {:.2f} MB".format(
-                self.tracking.train_time,
-                self.tracking.validation_time,
-                self.tracking.shortlist_time,
-                self.model_size))
-
-
 
 
         # for epoch in range(init_epoch, init_epoch+num_epochs):
@@ -1178,6 +1167,7 @@ class ModelSShortlist(ModelBase):
         # Reset the logger to dump in train log file
         self.logger.addHandler(
             logging.FileHandler(os.path.join(result_dir, 'log_train.txt')))
+        self.logger.info(f"Net: {self.net}")
         self.logger.info("Loading training data.")
 
         train_dataset = self._create_dataset(
@@ -1191,8 +1181,7 @@ class ModelSShortlist(ModelBase):
             sampling_params=sampling_params,
             _type='embedding',
             max_len=max_len,
-            batch_type=batch_type,
-            shorty=self.shorty
+            batch_type=batch_type
             )
         _train_dataset = train_dataset
         self.init_classifier(train_dataset)
@@ -1266,8 +1255,7 @@ class ModelSShortlist(ModelBase):
                 sampling_params=sampling_params,
                 _type='embedding',
                 max_len=max_len,
-                batch_type=batch_type,
-                shorty=self.shorty
+                batch_type=batch_type
                 )
             validation_loader = self._create_data_loader(
                 validation_dataset,
@@ -1296,10 +1284,36 @@ class ModelSShortlist(ModelBase):
                   validate_after, beta, sampling_params,
                   use_intermediate_for_shorty,
                   precomputed_intermediate, filter_map)
+        # learn anns over label embeddings and label classifiers
+        self.post_process_for_inference(train_dataset, batch_size)
         train_time = self.tracking.train_time + self.tracking.shortlist_time
+        self.tracking.save(
+            os.path.join(self.result_dir, 'training_statistics.pkl'))
+        self.logger.info(
+            "Training time: {:.2f} sec, Validation time: {:.2f} sec, "
+            "Shortlist time: {:.2f} sec, Model size: {:.2f} MB".format(
+                self.tracking.train_time,
+                self.tracking.validation_time,
+                self.tracking.shortlist_time,
+                self.model_size))
         return train_time, self.model_size
 
-    def _predict(self, data_loader, top_k, use_intermediate_for_shorty, beta):
+    def post_process_for_inference(self, dataset, batch_size=128):
+        start_time = time.time()
+        self.net.eval()
+        torch.set_grad_enabled(False)
+        embeddings = self.get_embeddings(
+            data=dataset.lbl_features.data,
+            encoder=self.net.encode_label,
+            batch_size=batch_size,
+            feature_type=dataset.feature_type
+            )
+        classifiers = self.net.get_clf_weights()
+        self.shortlister.fit(embeddings, classifiers)
+        self.tracking.shortlist_time += (time.time() - start_time) 
+
+    def _predict(self, dataset, k, batch_size, num_workers, 
+                 beta, use_intermediate_for_shorty):
         """
         Predict for the given data_loader
         Arguments
@@ -1315,51 +1329,55 @@ class ModelSShortlist(ModelBase):
         predicted_labels: csr_matrix
             predictions for the given dataset
         """
-        self.logger.info("Loading test data.")
         self.net.eval()
-        num_labels = data_loader.dataset.num_labels
-
         torch.set_grad_enabled(False)
-        self.logger.info("Fetching shortlist.")
-        self._update_shortlist(
-            dataset=data_loader.dataset,
-            use_intermediate=use_intermediate_for_shorty,
-            mode='predict',
-            flag=self.shorty is not None)
-        num_instances = data_loader.dataset.num_instances
+
+        self.logger.info("Getting test embeddings.")
+        num_instances = dataset.num_instances
+        num_labels = dataset.num_labels
+
+        doc_embeddings = self.get_embeddings(
+            data=dataset.features.data,
+            encoder=self.net.encode_document,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            feature_type=dataset.feature_type
+            )
+
+        self.logger.info("Querying ANNS.")
         predicted_labels = {}
-        predicted_labels['knn'] = SMatrix(
-            n_rows=num_instances,
-            n_cols=num_labels,
-            nnz=top_k)
+        pred_knn, pred_clf = self.shortlister.query(doc_embeddings)
+        predicted_labels['knn'] =  csr_from_arrays(
+            pred_knn[0], pred_knn[1],
+            shape=(num_instances, num_labels+1)
+            )[:, :-1]
 
-        predicted_labels['clf'] = SMatrix(
-            n_rows=num_instances,
-            n_cols=num_labels,
-            nnz=top_k)
+        predicted_labels['clf'] =  csr_from_arrays(
+            pred_clf[0], pred_clf[1],
+            shape=(num_instances, num_labels+1)
+            )[:, :-1]
 
-        count = 0
-        for batch_data in tqdm(data_loader):
-            batch_size = batch_data['batch_size']
-            out_ans = self.net.forward(batch_data)
-            self._update_predicted_shortlist(
-                count, batch_size, predicted_labels,
-                out_ans, batch_data)
-            count += batch_size
-            del batch_data
-        for k, v in predicted_labels.items():
-            predicted_labels[k] = v.data()
         predicted_labels['ens'] = self._combine_scores(
             predicted_labels['clf'], predicted_labels['knn'], beta)
         return predicted_labels
 
-    def predict(self, data_dir, result_dir, dataset, data=None,
-                tst_feat_fname='tst_X_Xf.txt', tst_label_fname='tst_X_Y.txt',
-                lbl_feat_fname='lbl_X_Xf.txt', batch_size=256, num_workers=6,
-                keep_invalid=False, feature_indices=None, label_indices=None,
-                top_k=50, normalize_features=True, normalize_labels=False,
-                feature_type='sparse', pretrained_shortlist=None,
-                use_intermediate_for_shorty=True, beta=0.2, **kwargs):
+    def predict(self, 
+                data_dir,
+                result_dir,
+                dataset,
+                fname,
+                data=None,
+                max_len=32,
+                batch_size=128,
+                num_workers=4,
+                normalize_features=True,
+                normalize_labels=False,
+                beta=0.2,
+                top_k=100,
+                use_intermediate_for_shorty=True,
+                feature_type='sparse',
+                filter_map=None,
+                **kwargs):
         """
         Predict for the given data
         * Also prints prediction time, precision and ndcg
@@ -1411,35 +1429,30 @@ class ModelSShortlist(ModelBase):
         predicted_labels: csr_matrix
             predictions for the given dataset
         """
+        self.logger.addHandler(
+            logging.FileHandler(os.path.join(result_dir, 'log_predict.txt')))
+        filter_map = np.loadtxt(os.path.join(
+                data_dir, dataset, filter_map)).astype(np.int)
         dataset = self._create_dataset(
-            os.path.join(data_dir, dataset),
-            fname_features=tst_feat_fname,
-            fname_labels=tst_label_fname,
-            fname_label_features=lbl_feat_fname,
+            data_dir=os.path.join(data_dir, dataset),
+            fname=fname,
             data=data,
-            mode='predict',
-            feature_type=feature_type,
-            size_shortlist=self.shortlist_size,
-            _type='shortlist',
-            pretrained_shortlist=pretrained_shortlist,
-            keep_invalid=keep_invalid,
+            mode='test',
             normalize_features=normalize_features,
             normalize_labels=normalize_labels,
-            feature_indices=feature_indices,
-            label_indices=label_indices)
-        data_loader = self._create_data_loader(
             feature_type=feature_type,
-            classifier_type='shortlist',
-            dataset=dataset,
-            batch_size=batch_size,
-            num_workers=num_workers)
+            _type='embedding',
+            max_len=max_len,
+            batch_type='doc'
+            )
         time_begin = time.time()
         predicted_labels = self._predict(
-            data_loader, top_k, beta, use_intermediate_for_shorty)
+            dataset, top_k, batch_size, num_workers,
+            beta, use_intermediate_for_shorty)
         time_end = time.time()
         prediction_time = time_end - time_begin
-        avg_prediction_time = prediction_time*1000/len(data_loader.dataset)
-        acc = self.evaluate(dataset.labels.data, predicted_labels)
+        avg_prediction_time = prediction_time*1000/len(dataset)
+        acc = self.evaluate(dataset.labels, predicted_labels, filter_map)
         _res = self._format_acc(acc)
         self.logger.info(
             "Prediction time (total): {:.2f} sec., "
@@ -1452,36 +1465,20 @@ class ModelSShortlist(ModelBase):
     def save_checkpoint(self, model_dir, epoch):
         # Avoid purge call from base class
         super().save_checkpoint(model_dir, epoch, False)
-        if self.shorty is not None:
-            self.tracking.saved_checkpoints[-1]['ANN'] \
-                = 'checkpoint_ANN_{}.pkl'.format(epoch)
-            self.shorty.save(os.path.join(
-                model_dir, self.tracking.saved_checkpoints[-1]['ANN']))
         self.purge(model_dir)
 
     def load_checkpoint(self, model_dir, fname, epoch):
         super().load_checkpoint(model_dir, fname, epoch)
-        if self.shorty is not None:
-            fname = os.path.join(model_dir, 'checkpoint_ANN_{}'.format(epoch))
-            self.shorty.load(fname)
 
     def save(self, model_dir, fname):
         super().save(model_dir, fname)
-        if self.shorty is not None:
-            self.shorty.save(os.path.join(model_dir, fname+'_ANN'))
+        if self.shortlister is not None:
+            self.shortlister.save(os.path.join(model_dir, fname+'_ANN'))
 
     def load(self, model_dir, fname):
         super().load(model_dir, fname)
-        if self.shorty is not None:
-            self.shorty.load(os.path.join(model_dir, fname+'_ANN'))
-
-    def purge(self, model_dir):
-        if self.shorty is not None:
-            if len(self.tracking.saved_checkpoints) \
-                    > self.tracking.checkpoint_history:
-                fname = self.tracking.saved_checkpoints[0]['ANN']
-                self.shorty.purge(fname)  # let the class handle the deletion
-        super().purge(model_dir)
+        if self.shortlister is not None:
+            self.shortlister.load(os.path.join(model_dir, fname+'_ANN'))
 
     def evaluate(self, true_labels, predicted_labels, filter_map=None):
         def _filter(pred, mapping):
@@ -1503,6 +1500,6 @@ class ModelSShortlist(ModelBase):
     @property
     def model_size(self):
         s = self.net.model_size
-        if self.shorty is not None:
-            return s + self.shorty.model_size
+        if self.shortlister is not None:
+            return s + self.shortlister.model_size
         return s

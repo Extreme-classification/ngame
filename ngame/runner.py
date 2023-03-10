@@ -157,11 +157,11 @@ def run_ngame(work_dir, pipeline, version, seed, config):
     train_time += _train_time
     model_size += _model_size
 
-    exit()
 
 
     # predict using extreme classifiers
     args.pred_fname = 'tst_predictions'
+    args.filter_map = "filter_labels_test.txt"
     args.mode = 'predict'
     _, _, _pred_time = main(args)
     avg_prediction_time += _pred_time

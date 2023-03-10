@@ -60,11 +60,15 @@ class ShortlistMIPS(Shortlist):
         return ind, sim
 
     def save(self, fname):
-        metadata = {
-            'valid_indices': self.valid_indices,
-        }
-        pickle.dump(metadata, open(fname+".metadata", 'wb'))
-        super().save(fname+".index")
+        try:
+            metadata = {
+                'valid_indices': self.valid_indices,
+            }
+            super().save(fname+".index")
+        except ValueError or AttributeError:
+            pass
+        finally:            
+            pickle.dump(metadata, open(fname+".metadata", 'wb'))
 
     def load(self, fname):
         self.index.load(fname+".index")
@@ -76,6 +80,65 @@ class ShortlistMIPS(Shortlist):
         # purge files from disk
         if os.path.isfile(fname+".index"):
             os.remove(fname+".index")
+        if os.path.isfile(fname+".metadata"):
+            os.remove(fname+".metadata")
+
+
+class DualShortlistMIPS(object):
+    """Get nearest labels using their embeddings
+    * brute or HNSW algorithm for search
+    * option to process label representations with label correlation matrix
+
+    Parameters
+    ----------
+    method: str, optional, default='hnsw'
+        brute or hnsw
+    num_neighbours: int
+        number of neighbors (same as efS)
+        * may be useful if the NN search retrieve less number of labels
+        * typically doesn't happen with HNSW etc.
+    M: int, optional, default=100
+        HNSW M (Usually 100)
+    efC: int, optional, default=300
+        construction parameter (Usually 300)
+    efS: int, optional, default=300
+        search parameter (Usually 300)
+    num_threads: int, optional, default=18
+        use multiple threads to cluster
+    space: str, optional, default='cosine'
+        metric to use while quering
+    verbose: boolean, optional, default=True
+        print progress
+    """
+    def __init__(self, method='hnswlib', num_neighbours=300, M=100, efC=300,
+                 efS=300, space='cosine', verbose=True, num_threads=16):
+        self.mips_z = ShortlistMIPS(
+            method, num_neighbours, M, efC, efS, space, verbose, num_threads)
+        self.mips_w = ShortlistMIPS(
+            method, num_neighbours, M, efC, efS, space, verbose, num_threads)
+
+    def fit(self, Z, W):
+        self.mips_z.fit(Z)
+        self.mips_w.fit(W)
+
+    def query(self, X, *args, **kwargs):
+        return self.mips_z.query(X), self.mips_w.query(X)
+
+    def save(self, fname):
+        self.mips_z.save(fname+".z")
+        self.mips_w.save(fname+".w")
+
+    def load(self, fname):
+        self.mips_z.load(fname+".z")
+        self.mips_w.load(fname+".w")
+
+    def purge(self, fname):
+        self.mips_z.purge(fname+".z")
+        self.mips_w.purge(fname+".w")
+
+    @property
+    def model_size(self):
+        return self.mips_z.model_size + self.mips_w.model_size
 
 
 class ClusteringIndex(object):
