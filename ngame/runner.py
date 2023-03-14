@@ -49,29 +49,36 @@ def create_surrogate_mapping(data_dir, g_config, seed):
     return data_stats, mapping
 
 
-def evaluate(g_config, data_dir, pred_fname, filter_fname=None, betas=-1, n_learners=1):
+def evaluate(config, data_dir, pred_fname, trn_pred_fname=None, n_learners=1):
     if n_learners == 1:
-        func = evalaute.main
+        # use score-fusion to combine and then evaluate
+        if config["eval_method"] == "score_fusion":
+            func = evalaute.eval_with_score_fusion
+        # predictions are either from embedding or classifier
+        elif config["inference_method"] == "traditional":
+            func = evalaute.eval
+        else: 
+            raise NotImplementedError("")
     else:
         raise NotImplementedError("")
 
-    dataset = g_config['dataset']
-    data_dir = os.path.join(data_dir, dataset)
-    A = g_config['A']
-    B = g_config['B']
-    top_k = g_config['top_k']
+    data_dir = os.path.join(data_dir, config['dataset'])
     ans = func(
         tst_label_fname=os.path.join(
-            data_dir, g_config["tst_label_fname"]),
+            data_dir, config["tst_label_fname"]),
         trn_label_fname=os.path.join(
-            data_dir, g_config["trn_label_fname"]),
+            data_dir, config["trn_label_fname"]),
         pred_fname=pred_fname,
-        A=A, 
-        B=B,
-        filter_fname=filter_fname, 
-        betas=betas, 
-        top_k=top_k,
-        save=g_config["save_predictions"])
+        trn_pred_fname=trn_pred_fname,
+        A=config['A'], 
+        B=config['B'],
+        filter_fname=os.path.join(
+            data_dir, config["tst_filter_fname"]), 
+        trn_filter_fname=os.path.join(
+            data_dir, config["trn_filter_fname"]),
+        beta=config['beta'], 
+        top_k=config['top_k'],
+        save=config["save_predictions"])
     return ans
 
 
@@ -101,10 +108,6 @@ def run_ngame(work_dir, pipeline, version, seed, config):
 
     # Directory and filenames
     data_dir = os.path.join(work_dir, 'data')
-
-    filter_fname = os.path.join(data_dir, dataset, 'filter_labels_test.txt')
-    if not os.path.isfile(filter_fname):
-        filter_fname = None
     
     result_dir = os.path.join(
         work_dir, 'results', pipeline, arch, dataset, f'v_{version}')
@@ -138,8 +141,7 @@ def run_ngame(work_dir, pipeline, version, seed, config):
     _train_time, _ = main(args)
     train_time += _train_time
 
-
-    # train final representation and extreme classifiers
+    # set up things to train extreme classifiers
     _args.update(config['extreme'])
     args = _args.params
     args.surrogate_mapping = None
@@ -148,6 +150,7 @@ def run_ngame(work_dir, pipeline, version, seed, config):
     os.makedirs(args.result_dir, exist_ok=True)
     os.makedirs(args.model_dir, exist_ok=True)
 
+    # train extreme classifiers
     args.mode = 'train'
     args.arch = os.path.join(os.getcwd(), f'{arch}.json')
     temp = data_stats['extreme'].split(",")
@@ -157,16 +160,12 @@ def run_ngame(work_dir, pipeline, version, seed, config):
     train_time += _train_time
     model_size += _model_size
 
-
-
-    # predict using extreme classifiers
+    # predict using shortlist and extreme classifiers for test set
     args.pred_fname = 'tst_predictions'
-    args.filter_map = "filter_labels_test.txt"
+    args.filter_map = g_config["tst_filter_fname"]
     args.mode = 'predict'
     _, _, _pred_time = main(args)
     avg_prediction_time += _pred_time
-
-    # copy the prediction files to level-1
     shutil.copy(
         os.path.join(result_dir, 'extreme', 'tst_predictions_clf.npz'),
         os.path.join(result_dir, 'tst_predictions_clf.npz'))
@@ -174,14 +173,40 @@ def run_ngame(work_dir, pipeline, version, seed, config):
         os.path.join(result_dir, 'extreme', 'tst_predictions_knn.npz'),
         os.path.join(result_dir, 'tst_predictions_knn.npz'))
 
-    # evaluate
-    pred_fname = os.path.join(result_dir, 'tst_predictions')
-    ans = evaluate(
-        g_config=g_config,
-        data_dir=data_dir,
-        pred_fname=pred_fname,
-        filter_fname=filter_fname,
-        betas=[0.10, 0.25, 0.50, 0.75, 0.90, 1.0])
+    if config['extreme']["inference_method"] == "dual_mips":
+        # predict using extreme classifiers and shortlist for train set
+        # required for score fusion 
+        # (validation set can be used here, if available)
+        args.pred_fname = 'trn_predictions'
+        args.filter_map = g_config["trn_filter_fname"]
+        args.mode = 'predict'
+        args.tst_feat_fname = g_config["trn_feat_fname"]
+        args.tst_label_fname = g_config["trn_label_fname"]
+        _, _, _pred_time = main(args)
+
+        #copy the prediction files to level-1
+        shutil.copy(
+            os.path.join(result_dir, 'extreme', 'trn_predictions_clf.npz'),
+            os.path.join(result_dir, 'trn_predictions_clf.npz'))
+        shutil.copy(
+            os.path.join(result_dir, 'extreme', 'trn_predictions_knn.npz'),
+            os.path.join(result_dir, 'trn_predictions_knn.npz'))
+
+        # evaluate
+        ans = evaluate(
+            config=g_config,
+            data_dir=data_dir,
+            pred_fname=os.path.join(result_dir, 'tst_predictions'),
+            trn_pred_fname=os.path.join(result_dir, 'trn_predictions'),
+            )
+    else:
+        # evaluate
+        ans = evaluate(
+            config=g_config,
+            data_dir=data_dir,
+            pred_fname=os.path.join(result_dir, 'tst_predictions'),
+            )
+
     print(ans)
     f_rstats = os.path.join(result_dir, 'log_eval.txt')
     with open(f_rstats, "w") as fp:

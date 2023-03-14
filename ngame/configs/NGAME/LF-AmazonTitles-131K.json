@@ -12,17 +12,21 @@
         "embedding_dims": 768,
         "top_k": 200,
         "num_points": 294805,
-	    "beta": 0.10,
+	    "beta": 1.0,
+        "eval_method": "score_fusion",
         "use_amp": true,
         "encoder_name": "msmarco-distilbert-base-v4",
         "save_predictions": true, 
         "lbl_feat_fname": "lbl_input_ids.npy,lbl_attention_mask.npy",
         "val_label_fname": "tst_X_Y.txt",
+        "trn_filter_fname": "filter_labels_train.txt",
         "val_feat_fname": "tst_doc_input_ids.npy,tst_doc_attention_mask.npy",
         "tst_label_fname": "tst_X_Y.txt",
+        "val_filter_fname": "filter_labels_test.txt",
         "tst_feat_fname": "tst_doc_input_ids.npy,tst_doc_attention_mask.npy",
         "trn_label_fname": "trn_X_Y.txt",
-        "trn_feat_fname": "trn_doc_input_ids.npy,trn_doc_attention_mask.npy"
+        "trn_feat_fname": "trn_doc_input_ids.npy,trn_doc_attention_mask.npy",
+        "tst_filter_fname": "filter_labels_test.txt"
     },
     "siamese": {
         "num_epochs": 300,

@@ -5,8 +5,8 @@
 - [x] Training encoders
 - [x] Training classifiers
 - [ ] Getting embeddings
-- [ ] Prediction
-- [ ] Score-fusion
+- [x] Prediction
+- [x] Score-fusion
 - [ ] Other feature encoders
 - [ ] Non-shared shortlist
 - [ ] Other negative-samplers

@@ -41,13 +41,6 @@ class Parameters(ParametersBase):
             type=float,
             help='Learning rate')
         self.parser.add_argument(
-            '--dlr_step',
-            dest='dlr_step',
-            default=7,
-            action='store',
-            type=int,
-            help='dlr_step')
-        self.parser.add_argument(
             '--last_saved_epoch',
             dest='last_epoch',
             default=0,
@@ -186,13 +179,6 @@ class Parameters(ParametersBase):
             type=int,
             help='#features')
         self.parser.add_argument(
-            '--k',
-            dest='k',
-            default=1,
-            action='store',
-            type=int,
-            help='k')
-        self.parser.add_argument(
             '--vocabulary_dims_document',
             dest='vocabulary_dims_document',
             default=-1,
@@ -220,13 +206,6 @@ class Parameters(ParametersBase):
             action='store',
             type=str,
             help='prediction file name')
-        self.parser.add_argument(
-            '--dlr_factor',
-            dest='dlr_factor',
-            default=0.5,
-            action='store',
-            type=float,
-            help='dlr_factor')
         self.parser.add_argument(
             '--m',
             dest='momentum',

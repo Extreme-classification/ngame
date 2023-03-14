@@ -305,12 +305,6 @@ class ModelSiamese(ModelBase):
             train_loader.dataset.update_state()
         self.save_checkpoint(self.model_dir, epoch+1)
         self.tracking.save(os.path.join(self.result_dir, 'training_statistics.pkl'))
-        self.logger.info(
-            "Training time: {:.2f} sec, Validation time: {:.2f} sec, "
-            "Shortlist time: {:.2f} sec".format(
-                self.tracking.train_time,
-                self.tracking.validation_time,
-                self.tracking.shortlist_time))
 
     def fit(
         self,
@@ -411,6 +405,15 @@ class ModelSiamese(ModelBase):
             use_intermediate_for_shorty=use_intermediate_for_shorty,
             filter_map=filter_map)            
         train_time = self.tracking.train_time + self.tracking.shortlist_time
+        self.tracking.save(
+            os.path.join(self.result_dir, 'training_statistics.pkl'))
+        self.logger.info(
+            "Training time: {:.2f} sec, Validation time: {:.2f} sec, "
+            "Shortlist time: {:.2f} sec, Model size: {:.2f} MB".format(
+                self.tracking.train_time,
+                self.tracking.validation_time,
+                self.tracking.shortlist_time,
+                self.model_size))
         return train_time, self.model_size
 
     def _create_weighted_data_loader(
