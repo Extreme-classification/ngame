@@ -6,6 +6,42 @@ from xclib.utils.shortlist import Shortlist
 from xclib.utils.clustering import cluster_balance, b_kmeans_dense
 
 
+def construct_shortlister(args):
+    """Construct shortlister
+    * used during predictions
+
+    Arguments:
+    ----------
+    args: NameSpace
+        parameters of the model with following inference methods
+        * mips
+          predict using a single nearest neighbor structure learned
+          over label classifiers
+        * dual_mips
+          predict using two nearest neighbor structures learned
+          over label embeddings and label classifiers
+    """
+    if args.inference_method == 'mips':  # Negative Sampling
+        shortlister = ShortlistMIPS(
+            method=args.ann_method,
+            num_neighbours=args.num_nbrs,
+            M=args.M,
+            efC=args.efC,
+            efS=args.efS,
+            num_threads=args.ann_threads)
+    elif args.inference_method == 'dual_mips':
+        shortlister = DualShortlistMIPS(
+            method=args.ann_method,
+            num_neighbours=args.num_nbrs,
+            M=args.M,
+            efC=args.efC,
+            efS=args.efS,
+            num_threads=args.ann_threads)
+    else:
+        shortlister = None
+    return shortlister
+
+
 @nb.njit(parallel=True)
 def map_dense(ind, mapping):
     out = np.full_like(ind, fill_value=0)

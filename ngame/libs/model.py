@@ -1,54 +1,76 @@
-from functools import partial
 from .model_base import ModelBase
-from .dataset import XDatasetBDIS, SDatasetBDIS
-from .dataset_base import DatasetTensor
 import time
 import os
+from .utils import get_filter_map, predict_anns
 import numpy as np
 import torch
-from scipy.sparse import issparse
-from .collate_fn import collate_fn_seq_siamese, collate_fn_seq_xc
-from torch.utils.data import DataLoader
+from libs.batching import MySampler
 from xclib.utils.sparse import csr_from_arrays, normalize
-from .shortlist import ShortlistMIPS
 from tqdm import tqdm
-from xclib.utils.matrix import SMatrix
 import logging
 
 
-class MySampler(torch.utils.data.Sampler[int]):
-    def __init__(self, order):
-        self.order = order.copy()
+def construct_model(args, net, loss, optimizer, schedular, shortlister):
+    if args.network_type == 'siamese':
+        if args.sampling_type == 'implicit':
+            return SModelIS(
+                net=net,
+                criterion=loss,
+                optimizer=optimizer,
+                schedular=schedular,
+                model_dir=args.model_dir,
+                result_dir=args.result_dir)
+        elif args.sampling_type == 'explicit':
+            raise NotImplementedError("")
+        else:
+            raise NotImplementedError("")
+    elif args.network_type == 'xc':
+        if args.sampling_type == 'implicit':
+            return XModelIS(
+                net=net,
+                criterion=loss,
+                optimizer=optimizer,
+                schedular=schedular,
+                model_dir=args.model_dir,
+                result_dir=args.result_dir,
+                shortlister=shortlister)
+        elif args.sampling_type == 'explicit':
+            raise NotImplementedError("")
+        else:
+            raise NotImplementedError("")
+    else:
+        raise NotImplementedError("")
 
-    def update_order(self, x):
-        self.order[:] = x[:]
 
-    def __iter__(self):
-        return iter(self.order)
-
-    def __len__(self) -> int:
-        return len(self.order)
-
-
-class ModelSiamese(ModelBase):
+class ModelIS(ModelBase):
     """
-    Models class for Siamese style models
+    Generic class for models with implicit sampling
     
+    Implicit sampling:
+    - Negatives are not explicity sampled but selected
+    from positive labels of other documents in the mini-batch
+    - Also referred as in-batch or DPR in literature
+
     Arguments
     ---------
-    params: NameSpace
-        object containing parameters like learning rate etc.
     net: models.network.DeepXMLBase
         * DeepXMLs: network with a label shortlist
         * DeepXMLf: network with fully-connected classifier
     criterion: libs.loss._Loss
-        to compute loss given y and y_hat
+        to compute loss given y, y_hat and mask
     optimizer: libs.optimizer.Optimizer
         to back-propagate and updating the parameters
-    shorty: libs.shortlist.Shortlist
-        to generate a shortlist of labels (random or from ANN)
+    schedular: torch.optim.lr_schedular
+        to compute loss given y, y_hat and mask
+    model_dir: str
+        path to model dir (will save models here)
+    result_dir: str
+        path to result dir (will save results here)
+    result_dir: str
+        path to result dir (will save results here)
+    shortlister: libs.shortlist.Shortlist
+        to generate a shortlist of labels (to be used at prediction time)
     """
-
     def __init__(
         self,
         net,
@@ -57,10 +79,7 @@ class ModelSiamese(ModelBase):
         schedular,
         model_dir,
         result_dir,
-        freeze_intermediate=False,
-        feature_type='sparse',
-        use_amp=False,
-        shorty=None
+        shortlister=None
     ):
         super().__init__(
             net=net,
@@ -68,49 +87,21 @@ class ModelSiamese(ModelBase):
             optimizer=optimizer,
             schedular=schedular,
             model_dir=model_dir,
-            result_dir=result_dir,
-            freeze_intermediate=freeze_intermediate,
-            use_amp=use_amp,
-            feature_type=feature_type,
+            result_dir=result_dir
         )
-        self.shorty = shorty
+        self.shortlister = shortlister
         self.memory_bank = None
 
-    def _create_dataset(
-        self,
-        data_dir,
-        fname,
-        sampling_params=None,
-        data=None,
-        batch_type=None,
-        _type=None,
-        max_len=32,
-        *args, **kwargs):
-        """
-        Create dataset as per given parameters
-        """
-        if batch_type == 'lbl':
-            return SDatasetBLIS(
-                data_dir, **fname, sampling_params=sampling_params, max_len=max_len)
-        elif batch_type == 'doc':
-            return SDatasetBDIS(
-                data_dir, **fname, sampling_params=sampling_params, max_len=max_len)
-        else:
-            return DatasetTensor(data_dir, fname, data, _type='sequential')
-
-    def _compute_loss_one(self, _pred, _true, _mask):
-        # Compute loss for one classifier
-        _true = _true.to(_pred.get_device())
-        if _mask is not None:
-            _mask = _mask.to(_true.get_device())
-        return self.criterion(_pred, _true, _mask)
-
-    def _compute_loss(self, out_ans, batch_data):
+    def _compute_loss(self, y_hat, batch_data):
         """
         Compute loss for given pair of ground truth and logits
         """
-        return self._compute_loss_one(
-            out_ans, batch_data['Y'], batch_data['Y_mask'])
+        y = batch_data['Y'].to(y_hat.device)
+        mask = batch_data['Y_mask']
+        return self.criterion(
+            y_hat,
+            y,
+            mask.to(y_hat.device) if mask is not None else mask)
 
     def update_order(self, data_loader):
         data_loader.batch_sampler.sampler.update_order(
@@ -160,7 +151,6 @@ class ModelSiamese(ModelBase):
             del batch_data
         return mean_loss / data_loader.dataset.num_instances
 
-
     def _step(self, data_loader, precomputed_intermediate=False):
         """
         Training step (one pass over dataset)
@@ -203,6 +193,68 @@ class ModelSiamese(ModelBase):
             del batch_data
         return mean_loss / data_loader.dataset.num_instances
 
+    def create_batch_sampler(self, dataset, batch_size, shuffle):
+        if shuffle:
+            order = dataset.indices_permutation()
+        else:
+            order = np.arange(len(dataset))
+        return torch.utils.data.sampler.BatchSampler(
+                MySampler(order), batch_size, False)
+
+    def _strip_padding_label(self, mat, num_labels):
+        stripped_vals = {}
+        for key, val in mat.items():
+            stripped_vals[key] = val[:, :num_labels].tocsr()
+            del val
+        return stripped_vals
+
+
+class SModelIS(ModelIS):
+    """
+    For models that do Siamese training with implicit sampling
+    
+    * Siamese training: label embeddings are treated as classifiers
+    * Implicit sampling: negatives are not explicity sampled but
+    selected from positive labels of other documents in the mini-batch
+
+    Arguments
+    ---------
+    net: models.network.DeepXMLBase
+        * DeepXMLs: network with a label shortlist
+        * DeepXMLf: network with fully-connected classifier
+    criterion: libs.loss._Loss
+        to compute loss given y, y_hat and mask
+    optimizer: libs.optimizer.Optimizer
+        to back-propagate and updating the parameters
+    schedular: torch.optim.lr_schedular
+        to compute loss given y, y_hat and mask
+    model_dir: str
+        path to model dir (will save models here)
+    result_dir: str
+        path to result dir (will save results here)
+    shortlister: libs.shortlist.Shortlist
+        to generate a shortlist of labels (to be used at prediction time)
+    """
+    def __init__(
+        self,
+        net,
+        criterion,
+        optimizer,
+        schedular,
+        model_dir,
+        result_dir,
+        shortlister=None
+    ):
+        super().__init__(
+            net=net,
+            criterion=criterion,
+            optimizer=optimizer,
+            schedular=schedular,
+            model_dir=model_dir,
+            result_dir=result_dir,
+            shortlister=shortlister
+        )
+
     def _fit(
         self,
         train_loader,
@@ -211,7 +263,6 @@ class ModelSiamese(ModelBase):
         num_epochs,
         validate_after,
         beta,
-        use_intermediate_for_shorty,
         filter_map,
         sampling_params
     ):
@@ -223,11 +274,7 @@ class ModelSiamese(ModelBase):
             data loader over train dataset
         validation_loader: DataLoader or None
             data loader over validation dataset
-        model_dir: str
-            save checkpoints etc. in this directory
-        result_dir: str
-            save logs etc in this directory
-        init_epoch: int, optional, default=0
+        init_epoch: int
             start training from this epoch
             (useful when fine-tuning from a checkpoint)
         num_epochs: int
@@ -236,15 +283,13 @@ class ModelSiamese(ModelBase):
             validate after a gap of these many epochs
         beta: float
             weightage of classifier when combining with shortlist scores
-        use_intermediate_for_shorty: boolean
-            use intermediate representation for negative sampling/ ANN search
-        #TODO: complete documentation and implement with pre-computed features
-        precomputed_intermediate: boolean, optional, default=False
-            if precomputed intermediate features are already available
-            * avoid recomputation of intermediate features
+        filter_map: np.ndarray or None
+            mapping to filter the predictions
+        sampling_params: Namespace or None
+            parameters to be used for negative sampling
         """
-        smp_warmup = sampling_params.sampling_curr_epochs[0]
-        smp_refresh_interval = sampling_params.sampling_refresh_interval
+        smp_warmup = sampling_params.curr_epochs[0]
+        smp_refresh_interval = sampling_params.refresh_interval
 
         for epoch in range(init_epoch, init_epoch+num_epochs):
             if epoch >= smp_warmup and epoch % smp_refresh_interval == 0:
@@ -253,17 +298,16 @@ class ModelSiamese(ModelBase):
                     _X = self.get_embeddings(
                         data=train_loader.dataset.features.data,
                         encoder=self.net.encode_document,
-                        batch_size=train_loader.batch_sampler.batch_size//2,
+                        batch_size=train_loader.batch_sampler.batch_size,
                         feature_type=train_loader.dataset.feature_type
                         )
                 else:
                     _X = self.memory_bank
-                train_loader.dataset.update_shortlist(_X)
+                train_loader.dataset.update_sampler(_X)
                 sampling_time = time.time() - sampling_time
-                self.tracking.shortlist_time += sampling_time
+                self.tracking.sampling_time += sampling_time
                 self.logger.info(
                 "Updated sampler in time: {:.2f} sec".format(sampling_time))
-
 
             batch_train_start_time = time.time()
             if self.scaler is None:
@@ -284,7 +328,7 @@ class ModelSiamese(ModelBase):
                     train_loader, validation_loader, beta)
                 val_end_t = time.time()
                 _acc = self.evaluate(
-                    validation_loader.dataset.labels,
+                    validation_loader.dataset.labels.data,
                     predicted_labels, filter_map)
                 self.tracking.validation_time = self.tracking.validation_time \
                     + val_end_t - val_start_t
@@ -312,28 +356,96 @@ class ModelSiamese(ModelBase):
         dataset,
         trn_fname,
         val_fname,
-        sampling_params,
         trn_data=None,
         val_data=None,
-        num_epochs=10,
-        batch_size=128,
-        num_workers=4,
-        shuffle=False,
-        init_epoch=0,
+        filter_file_val=None,
+        feature_type='sparse',
         normalize_features=True,
         normalize_labels=False,
+        sampling_params=None,
+        freeze_encoder=False,
+        use_amp=True,
+        num_epochs=10,
+        init_epoch=0,
+        batch_size=128,
+        num_workers=6,
+        shuffle=True,
         validate=False,
-        beta=0.2,
-        use_intermediate_for_shorty=True,
         validate_after=20,
         batch_type='doc',
         max_len=32,
-        feature_type='sparse',
-        result_dir="",
+        beta=0.2,
         *args, **kwargs
     ):
+        """
+        Main training function to learn model parameters
+
+        Arguments
+        ---------
+        data_dir: str or None
+            load data from this directory when data is None
+        dataset: str
+            Name of the dataset
+        trn_fname: dict
+            file names to construct train dataset
+            * f_features: features file
+            * f_labels: labels file
+            * f_label_features: label feature file
+        val_fname: dict or None
+            file names to construct validation dataset
+            * f_features: features file
+            * f_labels: labels file
+            * f_label_features: label feature file
+        trn_data: dict or None, optional, default=None
+            directly use this this data to train when available
+            * X: feature; Y: label; Yf: label_features
+        val_data: dict or None, optional, default=None
+            directly use this this data to validate when available
+            * X: feature; Y: label; Yf: label_features
+        filter_file_val: str or None
+            mapping to filter the predictions for validation data
+        feature_type: str, optional, default='sparse'
+            sparse, sequential or dense features
+        normalize_features: bool, optional, default=True
+            Normalize data points to unit norm
+        normalize_lables: bool, optional, default=False
+            Normalize labels to convert in probabilities
+            Useful in-case on non-binary labels
+        sampling_params: Namespace or None
+            parameters to be used for negative sampling
+        freeze_encoder: boolean, optional (default=False)
+            freeze the encoder (embeddings can be pre-computed for efficiency)
+            * #TODO
+        use_amp: boolean, optional (default=True)
+            use automatic mixed-precision
+        num_epochs: int
+            #passes over the dataset
+        init_epoch: int
+            start training from this epoch
+            (useful when fine-tuning from a checkpoint)
+        batch_size: int, optional, default=128
+            batch size in data loader
+        num_workers: int, optional, default=6
+            #workers in data loader
+        shuffle: boolean, optional, default=True
+            shuffle train data in each epoch
+        validate: boolean, optional, default=True
+            validate or not
+        validate_after: int, optional, default=5
+            validate after a gap of these many epochs
+        batch_type: str, optional, default='doc'
+            * doc: batch over document and sample labels
+            * lbl: batch over labels and sample documents
+        max_len: int, optional, default=-1
+            maximum length in case of sequential features
+            * -1 would keep all the tokens (trust the dumped features)
+        beta: float
+            weightage of classifier when combining with shortlist scores
+        """
+        self.setup_amp(use_amp)
         self.logger.addHandler(
-            logging.FileHandler(os.path.join(result_dir, 'log_train.txt')))
+            logging.FileHandler(
+            os.path.join(self.result_dir, 'log_train.txt')))
         self.logger.info(f"Net: {self.net}")
         self.logger.info("Loading training data.")
         train_dataset = self._create_dataset(
@@ -345,17 +457,20 @@ class ModelSiamese(ModelBase):
             normalize_labels=normalize_labels,
             feature_type=feature_type,
             sampling_params=sampling_params,
-            _type='embedding',
             max_len=max_len,
+            classifier_type='siamese',
             batch_type=batch_type
             )
-        train_loader = self._create_weighted_data_loader(
+        train_loader = self._create_data_loader(
             train_dataset,
             batch_size=batch_size,
             max_len=max_len,
+            feature_type=feature_type,
+            classifier_type='siamese',
+            sampling_type=sampling_params.type,
             num_workers=num_workers,
             shuffle=shuffle)
-        if sampling_params.sampling_async:
+        if sampling_params.asynchronous:
             self.memory_bank = np.zeros(
                 (len(train_dataset), self.net.representation_dims),
                 dtype='float32')
@@ -368,32 +483,20 @@ class ModelSiamese(ModelBase):
                 fname=val_fname,
                 data=val_data,
                 mode='predict',
-                feature_type=feature_type,
                 normalize_features=normalize_features,
                 normalize_labels=normalize_labels,
-                size_shortlist=1,
-                _type='embedding',
+                feature_type=feature_type,
                 max_len=max_len,
                 batch_type='doc'
                 )
             validation_loader = self._create_data_loader(
                 validation_dataset,
+                feature_type=feature_type,
                 batch_size=batch_size,
                 num_workers=num_workers,
                 shuffle=False)
-            filter_map = os.path.join(
-                data_dir, dataset, 'filter_labels_test.txt')
-            filter_map = np.loadtxt(filter_map).astype(np.int)
-            val_ind = []
-            valid_mapping = dict(
-                zip(train_dataset._valid_labels,
-                    np.arange(train_dataset.num_labels)))
-            for i in range(len(filter_map)):
-                if filter_map[i, 1] in valid_mapping:
-                    filter_map[i, 1] = valid_mapping[filter_map[i, 1]]
-                    val_ind.append(i)
-            filter_map = filter_map[val_ind]
-
+            filter_map = get_filter_map(os.path.join(
+                data_dir, dataset, filter_file_val))
         self._fit(
             train_loader=train_loader,
             validation_loader=validation_loader,
@@ -402,42 +505,24 @@ class ModelSiamese(ModelBase):
             validate_after=validate_after,
             beta=beta,
             sampling_params=sampling_params,
-            use_intermediate_for_shorty=use_intermediate_for_shorty,
             filter_map=filter_map)            
-        train_time = self.tracking.train_time + self.tracking.shortlist_time
+        train_time = self.tracking.train_time \
+            + self.tracking.shortlist_time \
+            + self.tracking.sampling_time
         self.tracking.save(
             os.path.join(self.result_dir, 'training_statistics.pkl'))
         self.logger.info(
-            "Training time: {:.2f} sec, Validation time: {:.2f} sec, "
-            "Shortlist time: {:.2f} sec, Model size: {:.2f} MB".format(
+            "Training time: {:.2f} sec, Sampling time: {:.2f} sec, "
+            "Shortlist time: {:.2f} sec, Validation time: {:.2f} sec, "
+            "Model size: {:.2f} MB\n".format(
                 self.tracking.train_time,
-                self.tracking.validation_time,
+                self.tracking.sampling_time,
                 self.tracking.shortlist_time,
+                self.tracking.validation_time,
                 self.model_size))
         return train_time, self.model_size
 
-    def _create_weighted_data_loader(
-        self,
-        dataset,
-        batch_size=128,
-        max_len=32,
-        num_workers=4,
-        prefetch_factor=5,
-        shuffle=False):
-        """
-            Create data loader for given dataset
-        """
-        order = dataset.indices_permutation()
-        dt_loader = DataLoader(
-            dataset,
-            batch_sampler=torch.utils.data.sampler.BatchSampler(MySampler(order), batch_size, False),
-            num_workers=num_workers,
-            prefetch_factor=prefetch_factor,
-            collate_fn=partial(collate_fn_seq_siamese, max_len=max_len)
-            )
-        return dt_loader
-
-    def _validate(self, train_data_loader, data_loader, beta=0.2, gamma=0.5):
+    def _validate(self, train_data_loader, data_loader, *args, **kwargs):
         self.net.eval()
         torch.set_grad_enabled(False)
         num_labels = data_loader.dataset.num_labels
@@ -445,67 +530,48 @@ class ModelSiamese(ModelBase):
         val_doc_embeddings = self.get_embeddings(
             data=data_loader.dataset.features.data,
             encoder=self.net.encode_document,
-            batch_size=data_loader.batch_size,
+            batch_size=data_loader.batch_sampler.batch_size,
             feature_type=data_loader.dataset.feature_type
             )
         self.logger.info("Getting label embeddings")
         lbl_embeddings = self.get_embeddings(
-            data=train_data_loader.dataset.lbl_features.data,
+            data=train_data_loader.dataset.label_features.data,
             encoder=self.net.encode_label,
-            batch_size=data_loader.batch_size,
+            batch_size=data_loader.batch_sampler.batch_size,
             feature_type=train_data_loader.dataset.feature_type
             )
-        _shorty = ShortlistMIPS()
-        _shorty.fit(lbl_embeddings)
         predicted_labels = {}
-        ind, val = _shorty.query(val_doc_embeddings)
-        predicted_labels['knn'] = csr_from_arrays(
-            ind, val, shape=(data_loader.dataset.num_instances,
-            num_labels+1))
+        predicted_labels['knn'] = predict_anns(
+            val_doc_embeddings, lbl_embeddings)
         return self._strip_padding_label(predicted_labels, num_labels), \
             'NaN'
-
-    def _strip_padding_label(self, mat, num_labels):
-        stripped_vals = {}
-        for key, val in mat.items():
-            stripped_vals[key] = val[:, :num_labels].tocsr()
-            del val
-        return stripped_vals
-
-    def evaluate(self, true_labels, predicted_labels, filter_map=None):
-        def _filter(pred, mapping):
-            if mapping is not None and len(mapping) > 0:
-                pred[mapping[:, 0], mapping[:, 1]] = 0
-                pred.eliminate_zeros()
-            return pred
-        if issparse(predicted_labels):
-            return self._evaluate(
-                true_labels, _filter(predicted_labels, filter_map))
-        else:  # Multiple set of predictions
-            acc = {}
-            for key, val in predicted_labels.items():
-                acc[key] = self._evaluate(
-                    true_labels, _filter(val, filter_map))
-            return acc
         
 
-class ModelSShortlist(ModelBase):
+class XModelIS(ModelIS):
     """
-    Models with label shortlist
+    For models that do XC training with implicit sampling
+
+    * XC training: classifiers and encoders (optionally) are trained    
+    * Implicit sampling: negatives are not explicity sampled but
+    selected from positive labels of other documents in the mini-batch
+
     Arguments
     ---------
-    params: NameSpace
-        object containing parameters like learning rate etc.
     net: models.network.DeepXMLBase
         * DeepXMLs: network with a label shortlist
         * DeepXMLf: network with fully-connected classifier
     criterion: libs.loss._Loss
-        to compute loss given y and y_hat
+        to compute loss given y, y_hat and mask
     optimizer: libs.optimizer.Optimizer
         to back-propagate and updating the parameters
-    shorty: libs.shortlist.Shortlist
-        to generate a shortlist of labels (typically an ANN structure)
-        * same shortlist method is used during training and prediction
+    schedular: torch.optim.lr_schedular
+        to compute loss given y, y_hat and mask
+    model_dir: str
+        path to model dir (will save models here)
+    result_dir: str
+        path to result dir (will save results here)
+    shortlister: libs.shortlist.Shortlist
+        to generate a shortlist of labels (to be used at prediction time)
     """
 
     def __init__(
@@ -516,9 +582,6 @@ class ModelSShortlist(ModelBase):
         schedular,
         model_dir,
         result_dir,
-        freeze_intermediate=False,
-        feature_type='sparse',
-        use_amp=False,
         shortlister=None
     ):
         super().__init__(
@@ -528,28 +591,8 @@ class ModelSShortlist(ModelBase):
             schedular=schedular,
             model_dir=model_dir,
             result_dir=result_dir,
-            freeze_intermediate=freeze_intermediate,
-            use_amp=use_amp,
-            feature_type=feature_type,
+            shortlister=shortlister
         )
-        self.shortlister = shortlister
-        self.memory_bank = None
-
-    def _compute_loss_one(self, _pred, _true, _mask):
-        """
-        Compute loss for one classifier
-        """
-        _true = _true.to(_pred.get_device())
-        if _mask is not None:
-            _mask = _mask.to(_true.get_device())
-        return self.criterion(_pred, _true, _mask).to(_true.get_device())
-
-    def _compute_loss(self, out_ans, batch_data):
-        """
-        Compute loss for given pair of ground truth and logits
-        """
-        return self._compute_loss_one(
-            out_ans, batch_data['Y'], batch_data['Y_mask'])
 
     def _combine_scores(self, score_knn, score_clf, beta):
         """
@@ -558,96 +601,7 @@ class ModelSShortlist(ModelBase):
         """
         return beta*score_knn + (1-beta)*score_clf
 
-    def _strip_padding_label(self, mat, num_labels):
-        stripped_vals = {}
-        for key, val in mat.items():
-            stripped_vals[key] = val[:, :num_labels].tocsr()
-            del val
-        return stripped_vals
-
-    def _fit_shorty(self, features, labels, doc_embeddings=None,
-                    lbl_embeddings=None, use_intermediate=True,
-                    feature_type='sparse'):
-        """
-        Train the ANN Structure with given data
-        * Support for pre-computed features
-        * Features are computed when pre-computed features are not available
-        Arguments
-        ---------
-        features: np.ndarray or csr_matrix or None
-            features for given data (used when doc_embeddings is None)
-        labels: csr_matrix
-            ground truth matrix for given data
-        doc_embeddings: np.ndarray or None, optional, default=None
-            pre-computed features; features are computed when None
-        lbl_embeddings: np.ndarray or None, optional, default=None
-            pre-computed label features; features are computed when None
-        use_intermediate: boolean, optional, default=True
-            use intermediate representation if True
-        feature_type: str, optional, default='sparse'
-            sparse or dense features
-        """
-        if doc_embeddings is None:
-            doc_embeddings = self.get_embeddings(
-                data=features,
-                feature_type=feature_type,
-                use_intermediate=use_intermediate)
-        if isinstance(self.shorty, ShortlistMIPS):
-            self.shorty.fit(X=lbl_embeddings, Y=labels)
-        else:
-            self.shorty.fit(X=doc_embeddings, Y=labels, Yf=lbl_embeddings)
-
-    def _update_shortlist(self, dataset, use_intermediate=True, mode='train',
-                          flag=True):
-        if flag:
-            if isinstance(dataset.features, DenseFeatures) and use_intermediate:
-                self.logger.info("Using pre-trained embeddings for shortlist.")
-                doc_embeddings = dataset.features.data
-                lbl_embeddings = dataset.label_features.data
-            else:
-                doc_embeddings = self.get_embeddings(
-                    data=dataset.features.data,
-                    encoder=self.net.encode_document,
-                    use_intermediate=use_intermediate)
-                lbl_embeddings = self.get_embeddings(
-                    data=dataset.label_features.data,
-                    encoder=self.net.encode_label,
-                    use_intermediate=use_intermediate)
-            if mode == 'train':
-                self.shorty.reset()
-                self._fit_shorty(
-                    features=None,
-                    labels=dataset.labels.data,
-                    lbl_embeddings=lbl_embeddings,
-                    doc_embeddings=doc_embeddings)
-            dataset.update_shortlist(
-                *self._predict_shorty(doc_embeddings))
-
-    def _predict_shorty(self, doc_embeddings):
-        """
-        Get nearest neighbors (and sim) for given document embeddings
-        Arguments
-        ---------
-        doc_embeddings: np.ndarray
-            embeddings/encoding for the data points
-        Returns
-        -------
-        neighbors: np.ndarray
-            indices of nearest neighbors
-        sim: np.ndarray
-            similarity with nearest neighbors
-        """
-        return self.shorty.query(doc_embeddings)
-
-    def _update_predicted_shortlist(self, count, batch_size, predicted_labels,
-                                    batch_out, batch_data):
-        _indices = batch_data['Y_s'].numpy()
-        _knn_score = batch_data['Y_sim'].numpy()
-        _clf_score = batch_out.data.cpu().numpy()
-        predicted_labels['clf'].update_block(count, _indices, _clf_score)
-        predicted_labels['knn'].update_block(count, _indices, _knn_score)
-
-    def _validate(self, data_loader, beta=0.2, top_k=20):
+    def _validate(self, data_loader, beta=0.2, top_k=100):
         """
         predict for the given data loader
         * retruns loss and predicted labels
@@ -664,33 +618,6 @@ class ModelSShortlist(ModelBase):
         loss: float
             mean loss over the validation dataset
         """
-        def _predict_ova(X, clf, k=20, batch_size=32, device="cuda", return_sparse=True):
-            """Predictions in brute-force manner"""
-            if not torch.cuda.is_available():
-                device = torch.device("cpu")
-            torch.set_grad_enabled(False)
-            num_instances, num_labels = len(X), len(clf)
-            batches = np.array_split(range(num_instances), num_instances//batch_size)
-            output = SMatrix(
-                n_rows=num_instances,
-                n_cols=num_labels,
-                nnz=k)
-            X = torch.from_numpy(X)        
-            clf = torch.from_numpy(clf).to(device).T   
-            for ind in tqdm(batches):
-                s_ind, e_ind = ind[0], ind[-1] + 1
-                _X = X[s_ind: e_ind].to(device)
-                ans = _X @ clf
-                vals, ind = torch.topk(
-                    ans, k=k, dim=-1, sorted=True)
-                output.update_block(
-                    s_ind, ind.cpu().numpy(), vals.cpu().numpy())
-                del _X
-            if return_sparse:
-                return output.data()
-            else:
-                return output.data('dense')[0]
-
         self.net.eval()
         torch.set_grad_enabled(False)
         num_labels = data_loader.dataset.num_labels
@@ -698,68 +625,25 @@ class ModelSShortlist(ModelBase):
         val_doc_embeddings = self.get_embeddings(
             data=data_loader.dataset.features.data,
             encoder=self.net.encode_document,
-            batch_size=1024, #data_loader.batch_size,
+            batch_size=data_loader.batch_sampler.batch_size,
             feature_type=data_loader.dataset.feature_type
             )
         self.logger.info("Getting label embeddings")
         lbl_embeddings = self.net.get_clf_weights()
         predicted_labels = {}
-        predicted_labels['knn'] = _predict_ova(val_doc_embeddings, lbl_embeddings)
-        # _shorty = ShortlistMIPS()
-        # _shorty.fit(lbl_embeddings)
-        # predicted_labels = {}
-        # ind, val = _shorty.query(val_doc_embeddings)
-        # predicted_labels['knn'] = csr_from_arrays(
-        #     ind, val, shape=(data_loader.dataset.num_instances,
-        #     num_labels+1))
+        predicted_labels['clf'] = predict_anns(
+            val_doc_embeddings, lbl_embeddings, k=top_k)
         return self._strip_padding_label(predicted_labels, num_labels), \
             'NaN'
-
-        # num_labels = data_loader.dataset.num_labels
-        # num_instances = data_loader.dataset.num_instances
-        # mean_loss = 0
-        # predicted_labels = {}
-        # predicted_labels['knn'] = SMatrix(
-        #     n_rows=num_instances,
-        #     n_cols=num_labels,
-        #     nnz=top_k)
-
-        # predicted_labels['clf'] = SMatrix(
-        #     n_rows=num_instances,
-        #     n_cols=num_labels,
-        #     nnz=top_k)
-
-        # count = 0
-        # for batch_data in tqdm(data_loader):
-        #     batch_size = batch_data['batch_size']
-        #     out_ans = self.net.forward(batch_data)
-        #     loss = self._compute_loss(out_ans, batch_data)/batch_size
-        #     mean_loss += loss.item()*batch_size
-        #     self._update_predicted_shortlist(
-        #         count, batch_size, predicted_labels, out_ans, batch_data)
-        #     count += batch_size
-        # for k, v in predicted_labels.items():
-        #     predicted_labels[k] = v.data()
-        # predicted_labels['ens'] = self._combine_scores(
-        #     predicted_labels['clf'], predicted_labels['knn'], beta)
-        # return predicted_labels, mean_loss / num_instances
-
-    def update_order(self, data_loader):
-        data_loader.batch_sampler.sampler.update_order(
-            data_loader.dataset.indices_permutation())
 
     def _fit(self,
              train_loader,
              validation_loader,
-             model_dir,
-             result_dir,
              init_epoch,
              num_epochs,
              validate_after,
              beta,
              sampling_params,
-             use_intermediate_for_shorty,
-             precomputed_intermediate,
              filter_map):
         """
         Train for the given data loader
@@ -769,11 +653,7 @@ class ModelSShortlist(ModelBase):
             data loader over train dataset
         validation_loader: DataLoader or None
             data loader over validation dataset
-        model_dir: str
-            save checkpoints etc. in this directory
-        result_dir: str
-            save logs etc in this directory
-        init_epoch: int, optional, default=0
+        init_epoch: int
             start training from this epoch
             (useful when fine-tuning from a checkpoint)
         num_epochs: int
@@ -782,15 +662,13 @@ class ModelSShortlist(ModelBase):
             validate after a gap of these many epochs
         beta: float
             weightage of classifier when combining with shortlist scores
-        use_intermediate_for_shorty: boolean
-            use intermediate representation for negative sampling/ ANN search
-        precomputed_intermediate: boolean, optional, default=False
-            if precomputed intermediate features are already available
-            * avoid recomputation of intermediate features
-        filter_labels: #TODO
+        filter_map: np.ndarray or None
+            mapping to filter the predictions
+        sampling_params: Namespace or None
+            parameters to be used for negative sampling
         """
-        smp_warmup = sampling_params.sampling_curr_epochs[0]
-        smp_refresh_interval = sampling_params.sampling_refresh_interval
+        smp_warmup = sampling_params.curr_epochs[0]
+        smp_refresh_interval = sampling_params.refresh_interval
 
         for epoch in range(init_epoch, init_epoch+num_epochs):
             if epoch >= smp_warmup and epoch % smp_refresh_interval == 0:
@@ -799,17 +677,16 @@ class ModelSShortlist(ModelBase):
                     _X = self.get_embeddings(
                         data=train_loader.dataset.features.data,
                         encoder=self.net.encode_document,
-                        batch_size=train_loader.batch_sampler.batch_size//2,
+                        batch_size=train_loader.batch_sampler.batch_size,
                         feature_type=train_loader.dataset.feature_type
                         )
                 else:
                     _X = self.memory_bank
-                train_loader.dataset.update_shortlist(_X)
+                train_loader.dataset.update_sampler(_X)
                 sampling_time = time.time() - sampling_time
-                self.tracking.shortlist_time += sampling_time
+                self.tracking.sampling_time += sampling_time
                 self.logger.info(
                 "Updated sampler in time: {:.2f} sec".format(sampling_time))
-
 
             batch_train_start_time = time.time()
             if self.scaler is None:
@@ -830,19 +707,19 @@ class ModelSShortlist(ModelBase):
                     validation_loader, beta)
                 val_end_t = time.time()
                 _acc = self.evaluate(
-                    validation_loader.dataset.labels,
+                    validation_loader.dataset.labels.data,
                     predicted_labels, filter_map)
                 self.tracking.validation_time = self.tracking.validation_time \
                     + val_end_t - val_start_t
                 self.tracking.mean_val_loss.append(val_avg_loss)
-                self.tracking.val_precision.append(_acc['knn'][0])
-                self.tracking.val_ndcg.append(_acc['knn'][1])
-                _acc = self._format_acc(_acc['knn'])
+                self.tracking.val_precision.append(_acc['clf'][0])
+                self.tracking.val_ndcg.append(_acc['clf'][1])
+                _acc = self._format_acc(_acc['clf'])
                 self.logger.info("Model saved after epoch: {}".format(epoch))
                 self.save_checkpoint(self.model_dir, epoch+1)
                 self.tracking.last_saved_epoch = epoch
                 self.logger.info(
-                    "P@1 (knn): {:s}, loss: {:s},"
+                    "P@1 (clf): {:s}, loss: {:s},"
                     " time: {:.2f} sec".format(
                         _acc, val_avg_loss,
                         val_end_t-val_start_t))
@@ -850,103 +727,10 @@ class ModelSShortlist(ModelBase):
             self.update_order(train_loader)
             train_loader.dataset.update_state()
         self.save_checkpoint(self.model_dir, epoch+1)
-
-
-        # for epoch in range(init_epoch, init_epoch+num_epochs):
-        #     cond = self.dlr_step != -1 and epoch % self.dlr_step == 0
-        #     if epoch != 0 and cond:
-        #         self._adjust_parameters()
-        #     batch_train_start_time = time.time()
-        #     if epoch % self.retrain_hnsw_after == 0:
-        #         self.logger.info(
-        #             "Updating shortlist at epoch: {}".format(epoch))
-        #         shorty_start_t = time.time()
-        #         self._update_shortlist(
-        #             dataset=train_loader.dataset,
-        #             use_intermediate=use_intermediate_for_shorty,
-        #             mode='train',
-        #             flag=self.shorty is not None)
-        #         if validation_loader is not None:
-        #             self._update_shortlist(
-        #                 dataset=validation_loader.dataset,
-        #                 use_intermediate=use_intermediate_for_shorty,
-        #                 mode='predict',
-        #                 flag=self.shorty is not None)
-        #         shorty_end_t = time.time()
-        #         self.logger.info("ANN train time: {0:.2f} sec".format(
-        #             shorty_end_t - shorty_start_t))
-        #         self.tracking.shortlist_time = self.tracking.shortlist_time \
-        #             + shorty_end_t - shorty_start_t
-        #         batch_train_start_time = time.time()
-        #     tr_avg_loss = self._step(
-        #         train_loader, batch_div=True,
-        #         precomputed_intermediate=precomputed_intermediate)
-        #     self.tracking.mean_train_loss.append(tr_avg_loss)
-        #     batch_train_end_time = time.time()
-        #     self.tracking.train_time = self.tracking.train_time + \
-        #         batch_train_end_time - batch_train_start_time
-
-        #     self.logger.info(
-        #         "Epoch: {:d}, loss: {:.6f}, time: {:.2f} sec".format(
-        #             epoch, tr_avg_loss,
-        #             batch_train_end_time - batch_train_start_time))
-        #     if validation_loader is not None and epoch % validate_after == 0:
-        #         val_start_t = time.time()
-        #         predicted_labels, val_avg_loss = self._validate(
-        #             validation_loader, beta, self.shortlist_size)
-        #         val_end_t = time.time()
-        #         _acc = self.evaluate(
-        #             validation_loader.dataset.labels.data,
-        #             predicted_labels, filter_labels)
-        #         self.tracking.validation_time = self.tracking.validation_time \
-        #             + val_end_t - val_start_t
-        #         self.tracking.mean_val_loss.append(val_avg_loss)
-        #         self.tracking.val_precision.append(_acc['ens'][0])
-        #         self.tracking.val_ndcg.append(_acc['ens'][1])
-        #         self.logger.info("Model saved after epoch: {}".format(epoch))
-        #         self.save_checkpoint(model_dir, epoch+1)
-        #         self.tracking.last_saved_epoch = epoch
-        #         _res = self._format_acc(_acc)
-        #         self.logger.info(
-        #             "P@k {:s}, loss: {:.6f}, time: {:.2f} sec".format(
-        #                 _res, val_avg_loss, val_end_t-val_start_t))
-        #     self.tracking.last_epoch += 1
-
-        # self.save_checkpoint(model_dir, epoch+1)
-        # self.tracking.save(os.path.join(result_dir, 'training_statistics.pkl'))
-        # self.logger.info(
-        #     "Training time: {:.2f} sec, Validation time: {:.2f} sec, "
-        #     "Shortlist time: {:.2f} sec, Model size: {:.2f} MB".format(
-        #         self.tracking.train_time,
-        #         self.tracking.validation_time,
-        #         self.tracking.shortlist_time,
-        #         self.model_size))
-
-    def _create_dataset(
-        self,
-        data_dir,
-        fname,
-        sampling_params=None,
-        data=None,
-        batch_type=None,
-        _type=None,
-        max_len=32,
-        *args, **kwargs):
-        """
-        Create dataset as per given parameters
-        """
-        if batch_type == 'lbl':
-            return DatasetBLIS(
-                data_dir, **fname, sampling_params=sampling_params, max_len=max_len)
-        elif batch_type == 'doc':
-            return XDatasetBDIS(
-                data_dir, **fname, sampling_params=sampling_params, max_len=max_len)
-        else:
-            return DatasetTensor(data_dir, fname, data, _type='sequential')
     
     def init_classifier(self, dataset, batch_size=128):
         lbl_embeddings = self.get_embeddings(
-            data=dataset.lbl_features.data,
+            data=dataset.label_features.data,
             encoder=self.net.encode_label,
             batch_size=batch_size,
             feature_type=dataset.feature_type
@@ -957,219 +741,101 @@ class ModelSShortlist(ModelBase):
              np.zeros((1, self.net.representation_dims))])
             )
 
-    def _create_data_loader(
-        self,
-        dataset,
-        batch_size=128,
-        max_len=32,
-        num_workers=4,
-        prefetch_factor=5,
-        shuffle=False):
-        """
-            Create data loader for given dataset
-        """
-        order = dataset.indices_permutation()
-        dt_loader = DataLoader(
-            dataset,
-            batch_sampler=torch.utils.data.sampler.BatchSampler(MySampler(order), batch_size, False),
-            num_workers=num_workers,
-            prefetch_factor=prefetch_factor,
-            collate_fn=partial(collate_fn_seq_xc, max_len=max_len)
-            )
-        return dt_loader
-
-    # def _step_amp(self, data_loader, precomputed_intermediate=False):
-    #     """
-    #     Training step (one pass over dataset)
-
-    #     Arguments
-    #     ---------
-    #     data_loader: DataLoader
-    #         data loader over train dataset
-    #     batch_div: boolean, optional, default=False
-    #         divide the loss with batch size?
-    #         * useful when loss is sum over instances and labels
-    #     precomputed_intermediate: boolean, optional, default=False
-    #         if precomputed intermediate features are already available
-    #         * avoid recomputation of intermediate features
-
-    #     Returns
-    #     -------
-    #     loss: float
-    #         mean loss over the train set
-    #     """
-    #     self.net.train()
-    #     torch.set_grad_enabled(True)
-    #     mean_loss = 0
-    #     pbar = tqdm(data_loader)
-    #     for batch_data in pbar:
-    #         self.optimizer.zero_grad()
-    #         batch_size = batch_data['batch_size']
-    #         with torch.cuda.amp.autocast():
-    #             out_ans, rep = self.net.forward(
-    #                 batch_data, precomputed_intermediate)
-    #             loss = self._compute_loss(out_ans, batch_data)
-    #         if self.memory_bank is not None:
-    #             ind = batch_data['indices']
-    #             self.memory_bank[ind] = rep.detach().cpu().numpy()
-    #         mean_loss += loss.item()*batch_size
-    #         self.scaler.scale(loss).backward()
-    #         self.scaler.step(self.optimizer)
-    #         self.scaler.update()
-    #         self.schedular.step()
-    #         pbar.set_description(
-    #             f"loss: {loss.item():.5f}")
-    #         del batch_data
-    #     return mean_loss / data_loader.dataset.num_instances
-
-
-    # def _step(self, data_loader, precomputed_intermediate=False):
-    #     """
-    #     Training step (one pass over dataset)
-
-    #     Arguments
-    #     ---------
-    #     data_loader: DataLoader
-    #         data loader over train dataset
-    #     batch_div: boolean, optional, default=False
-    #         divide the loss with batch size?
-    #         * useful when loss is sum over instances and labels
-    #     precomputed_intermediate: boolean, optional, default=False
-    #         if precomputed intermediate features are already available
-    #         * avoid recomputation of intermediate features
-
-    #     Returns
-    #     -------
-    #     loss: float
-    #         mean loss over the train set
-    #     """
-    #     self.net.train()
-    #     torch.set_grad_enabled(True)
-    #     mean_loss = 0
-    #     pbar = tqdm(data_loader)
-    #     for batch_data in pbar:
-    #         self.optimizer.zero_grad()
-    #         batch_size = batch_data['batch_size']
-    #         out_ans, rep = self.net.forward(
-    #             batch_data, precomputed_intermediate)
-    #         if self.memory_bank is not None:
-    #             ind = batch_data['indices']
-    #             self.memory_bank[ind] = rep.detach().cpu().numpy()
-    #         loss = self._compute_loss(out_ans, batch_data)
-    #         mean_loss += loss.item()*batch_size
-    #         loss.backward()
-    #         self.optimizer.step()
-    #         self.schedular.step()
-    #         pbar.set_description(
-    #             f"loss: {loss.item():.5f}")
-    #         del batch_data
-    #     return mean_loss / data_loader.dataset.num_instances
-
     def fit(self,
             data_dir,
-            model_dir,
-            result_dir,
             dataset,
-            num_epochs,
             trn_fname,
             val_fname,
-            sampling_params,
             trn_data=None,
             val_data=None,
-            batch_type='doc',
-            max_len=32,
-            batch_size=128,
-            num_workers=4,
-            shuffle=False,
-            init_epoch=0,
+            filter_file_val=None,
+            feature_type='sparse',
             normalize_features=True,
             normalize_labels=False,
+            sampling_params=None,
+            freeze_encoder=False,
+            use_amp=True,
+            num_epochs=10,
+            init_epoch=0,
+            batch_size=128,
+            num_workers=6,
+            shuffle=False,
             validate=False,
-            beta=0.2,
-            use_intermediate_for_shorty=True,
-            feature_type='sparse',
-            shortlist_method='static',
             validate_after=5,
-            surrogate_mapping=None,
-            trn_pretrained_shortlist=None,
-            val_pretrained_shortlist=None, **kwargs):
+            batch_type='doc',
+            max_len=-1,
+            beta=0.2,
+            *args, **kwargs):
         """
-        Train for the given data
-        * Also prints train time and model size
+        Main training function to learn model parameters
+
         Arguments
         ---------
-        data_dir: str or None, optional, default=None
+        data_dir: str or None
             load data from this directory when data is None
-        model_dir: str
-            save checkpoints etc. in this directory
-        result_dir: str
-            save logs etc in this directory
         dataset: str
             Name of the dataset
-        learning_rate: float
-            initial learning rate
-        num_epochs: int
-            #passes over the dataset
-        data: dict or None, optional, default=None
+        trn_fname: dict
+            file names to construct train dataset
+            * f_features: features file
+            * f_labels: labels file
+            * f_label_features: label feature file
+        val_fname: dict or None
+            file names to construct validation dataset
+            * f_features: features file
+            * f_labels: labels file
+            * f_label_features: label feature file
+        trn_data: dict or None, optional, default=None
             directly use this this data to train when available
-            * X: feature; Y: label
-        trn_feat_fname: str, optional, default='trn_X_Xf.txt'
-            train features
-        trn_label_fname: str, optional, default='trn_X_Y.txt'
-            train labels
-        val_feat_fname: str, optional, default='tst_X_Xf.txt'
-            validation features (used only when validate is True)
-        val_label_fname: str, optional, default='tst_X_Y.txt'
-            validation labels (used only when validate is True)
-        lbl_feat_fname: str, optional, default='lbl_X_Xf.txt'
-            label features
-        batch_size: int, optional, default=1024
-            batch size in data loader
-        num_workers: int, optional, default=6
-            #workers in data loader
-        shuffle: boolean, optional, default=True
-            shuffle train data in each epoch
-        init_epoch: int, optional, default=0
-            start training from this epoch
-            (useful when fine-tuning from a checkpoint)
-        keep_invalid: bool, optional, default=False
-            Don't touch data points or labels
-        feature_indices: str or None, optional, default=None
-            Train with selected features only (read from file)
-        label_indices: str or None, optional, default=None
-            Train for selected labels only (read from file)
+            * X: feature; Y: label; Yf: label_features
+        val_data: dict or None, optional, default=None
+            directly use this this data to validate when available
+            * X: feature; Y: label; Yf: label_features
+        filter_file_val: str or None
+            mapping to filter the predictions for validation data
+        feature_type: str, optional, default='sparse'
+            sparse, sequential or dense features
         normalize_features: bool, optional, default=True
             Normalize data points to unit norm
         normalize_lables: bool, optional, default=False
             Normalize labels to convert in probabilities
             Useful in-case on non-binary labels
-        validate: bool, optional, default=True
-            validate using the given data if flag is True
-        beta: float, optional, default=0.5
-            weightage of classifier when combining with shortlist scores
-        use_intermediate_for_shorty: boolean, optional, default=True
-            use intermediate representation for negative sampling/ANN
-        shortlist_method: str, optional, default='static'
-            static: fixed shortlist
-            dynamic: dynamically generate shortlist
-            hybrid: mixture of static and dynamic
+        sampling_params: Namespace or None
+            parameters to be used for negative sampling
+        freeze_encoder: boolean, optional (default=False)
+            freeze the encoder (embeddings can be pre-computed for efficiency)
+            * #TODO
+        use_amp: boolean, optional (default=True)
+            use automatic mixed-precision
+        num_epochs: int
+            #passes over the dataset
+        init_epoch: int
+            start training from this epoch
+            (useful when fine-tuning from a checkpoint)
+        batch_size: int, optional, default=128
+            batch size in data loader
+        num_workers: int, optional, default=6
+            #workers in data loader
+        shuffle: boolean, optional, default=True
+            shuffle train data in each epoch
+        validate: boolean, optional, default=True
+            validate or not
         validate_after: int, optional, default=5
             validate after a gap of these many epochs
-        surrogate_mapping: str, optional, default=None
-            Re-map clusters as per given mapping
-            e.g. when labels are clustered
-        feature_type: str, optional, default='sparse'
-            sparse or dense features
-        trn_pretrained_shortlist: csr_matrix or None, default=None
-            Shortlist for train dataset
-        val_pretrained_shortlist: csr_matrix or None, default=None
-            Shortlist for validation dataset
+        batch_type: str, optional, default='doc'
+            * doc: batch over document and sample labels
+            * lbl: batch over labels and sample documents
+        max_len: int, optional, default=-1
+            maximum length in case of sequential features
+            * -1 would keep all the tokens (trust the dumped features)
+        beta: float
+            weightage of classifier when combining with shortlist scores
         """
-
-        pretrained_shortlist = trn_pretrained_shortlist is not None
+        self.setup_amp(use_amp)
         # Reset the logger to dump in train log file
         self.logger.addHandler(
-            logging.FileHandler(os.path.join(result_dir, 'log_train.txt')))
+            logging.FileHandler(
+            os.path.join(self.result_dir, 'log_train.txt')))
         self.logger.info(f"Net: {self.net}")
         self.logger.info("Loading training data.")
 
@@ -1182,8 +848,8 @@ class ModelSShortlist(ModelBase):
             normalize_labels=normalize_labels,
             feature_type=feature_type,
             sampling_params=sampling_params,
-            _type='embedding',
             max_len=max_len,
+            classifier_type='xc',
             batch_type=batch_type
             )
         _train_dataset = train_dataset
@@ -1191,12 +857,12 @@ class ModelSShortlist(ModelBase):
 
         train_loader = self._create_data_loader(
             train_dataset,
-            # feature_type=train_dataset.feature_type,
-            # classifier_type='shortlist',
             batch_size=batch_size,
-            max_len=max_len,
             prefetch_factor=5,
+            feature_type=feature_type,
             num_workers=num_workers,
+            classifier_type='xc',
+            sampling_type=sampling_params.type,
             shuffle=shuffle)
         precomputed_intermediate = False
         # if self.freeze_intermediate or not self.update_shortlist:
@@ -1248,56 +914,51 @@ class ModelSShortlist(ModelBase):
         filter_map = None
         if validate:
             validation_dataset = self._create_dataset(
-                data_dir=os.path.join(data_dir, dataset),
+                os.path.join(data_dir, dataset),
                 fname=val_fname,
                 data=val_data,
-                mode='test',
+                mode='predict',
                 normalize_features=normalize_features,
                 normalize_labels=normalize_labels,
                 feature_type=feature_type,
-                sampling_params=sampling_params,
-                _type='embedding',
                 max_len=max_len,
-                batch_type=batch_type
+                batch_type='doc'
                 )
             validation_loader = self._create_data_loader(
                 validation_dataset,
-                # feature_type=train_dataset.feature_type,
-                # classifier_type='shortlist',
                 batch_size=batch_size,
-                max_len=max_len,
+                feature_type=feature_type,
                 prefetch_factor=5,
                 num_workers=num_workers,
                 shuffle=False)
-            filter_map = os.path.join(
-                data_dir, dataset, 'filter_labels_test.txt')
-            filter_map = np.loadtxt(filter_map).astype(np.int)
-            val_ind = []
-            valid_mapping = dict(
-                zip(_train_dataset._valid_labels,
-                    np.arange(train_dataset.num_labels)))
-            for i in range(len(filter_map)):
-                if filter_map[i, 1] in valid_mapping:
-                    filter_map[i, 1] = valid_mapping[filter_map[i, 1]]
-                    val_ind.append(i)
-            filter_map = filter_map[val_ind]
+            filter_map = get_filter_map(os.path.join(
+                data_dir, dataset, filter_file_val))
         del _train_dataset
-        self._fit(train_loader, validation_loader, model_dir,
-                  result_dir, init_epoch, num_epochs,
-                  validate_after, beta, sampling_params,
-                  use_intermediate_for_shorty,
-                  precomputed_intermediate, filter_map)
+        self._fit(
+            train_loader=train_loader,
+            validation_loader=validation_loader,
+            init_epoch=init_epoch,
+            num_epochs=num_epochs,
+            validate_after=validate_after,
+            beta=beta,
+            sampling_params=sampling_params,
+            filter_map=filter_map)
+
         # learn anns over label embeddings and label classifiers
         self.post_process_for_inference(train_dataset, batch_size)
-        train_time = self.tracking.train_time + self.tracking.shortlist_time
+        train_time = self.tracking.train_time \
+            + self.tracking.shortlist_time \
+            + self.tracking.sampling_time
         self.tracking.save(
             os.path.join(self.result_dir, 'training_statistics.pkl'))
         self.logger.info(
-            "Training time: {:.2f} sec, Validation time: {:.2f} sec, "
-            "Shortlist time: {:.2f} sec, Model size: {:.2f} MB".format(
+            "Training time: {:.2f} sec, Sampling time: {:.2f} sec, "
+            "Shortlist time: {:.2f} sec, Validation time: {:.2f} sec, "
+            "Model size: {:.2f} MB\n".format(
                 self.tracking.train_time,
-                self.tracking.validation_time,
+                self.tracking.sampling_time,
                 self.tracking.shortlist_time,
+                self.tracking.validation_time,
                 self.model_size))
         return train_time, self.model_size
 
@@ -1306,17 +967,18 @@ class ModelSShortlist(ModelBase):
         self.net.eval()
         torch.set_grad_enabled(False)
         embeddings = self.get_embeddings(
-            data=dataset.lbl_features.data,
+            data=dataset.label_features.data,
             encoder=self.net.encode_label,
             batch_size=batch_size,
             feature_type=dataset.feature_type
             )
         classifiers = self.net.get_clf_weights()
+        self.logger.info("Training ANNS..")
         self.shortlister.fit(embeddings, classifiers)
         self.tracking.shortlist_time += (time.time() - start_time) 
 
-    def _predict(self, dataset, k, batch_size, num_workers, 
-                 beta, use_intermediate_for_shorty):
+    def _predict(self, dataset, top_k, batch_size, num_workers, 
+                 beta):
         """
         Predict for the given data_loader
         Arguments
@@ -1325,8 +987,7 @@ class ModelSShortlist(ModelBase):
             DataLoader object to create batches and iterate over it
         top_k: int
             Maintain top_k predictions per data point
-        use_intermediate_for_shorty: bool
-            use intermediate representation for negative sampling/ANN
+
         Returns
         -------
         predicted_labels: csr_matrix
@@ -1347,7 +1008,7 @@ class ModelSShortlist(ModelBase):
             feature_type=dataset.feature_type
             )
 
-        self.logger.info("Querying ANNS.")
+        self.logger.info("Querying ANNS..")
         predicted_labels = {}
         pred_knn, pred_clf = self.shortlister.query(doc_embeddings)
         predicted_labels['knn'] =  csr_from_arrays(
@@ -1377,7 +1038,6 @@ class ModelSShortlist(ModelBase):
                 normalize_labels=False,
                 beta=0.2,
                 top_k=100,
-                use_intermediate_for_shorty=True,
                 feature_type='sparse',
                 filter_map=None,
                 **kwargs):
@@ -1444,18 +1104,16 @@ class ModelSShortlist(ModelBase):
             normalize_features=normalize_features,
             normalize_labels=normalize_labels,
             feature_type=feature_type,
-            _type='embedding',
             max_len=max_len,
             batch_type='doc'
             )
         time_begin = time.time()
         predicted_labels = self._predict(
-            dataset, top_k, batch_size, num_workers,
-            beta, use_intermediate_for_shorty)
+            dataset, top_k, batch_size, num_workers, beta)
         time_end = time.time()
         prediction_time = time_end - time_begin
         avg_prediction_time = prediction_time*1000/len(dataset)
-        acc = self.evaluate(dataset.labels, predicted_labels, filter_map)
+        acc = self.evaluate(dataset.labels.data, predicted_labels, filter_map)
         _res = self._format_acc(acc)
         self.logger.info(
             "Prediction time (total): {:.2f} sec., "
@@ -1465,40 +1123,37 @@ class ModelSShortlist(ModelBase):
                 avg_prediction_time, _res))
         return predicted_labels, prediction_time, avg_prediction_time
 
-    def save_checkpoint(self, model_dir, epoch):
-        # Avoid purge call from base class
-        super().save_checkpoint(model_dir, epoch, False)
-        self.purge(model_dir)
+    def save(self, model_dir, fname, *args):
+        """
+        Save model on disk
+        * uses prefix: _network.pkl for network
 
-    def load_checkpoint(self, model_dir, fname, epoch):
-        super().load_checkpoint(model_dir, fname, epoch)
-
-    def save(self, model_dir, fname):
-        super().save(model_dir, fname)
-        if self.shortlister is not None:
-            self.shortlister.save(os.path.join(model_dir, fname+'_ANN'))
-
-    def load(self, model_dir, fname):
+        Arguments:
+        ---------
+        model_dir: str
+            save model into this directory
+        fname: str
+            save model with this file name
+        """
         super().load(model_dir, fname)
         if self.shortlister is not None:
             self.shortlister.load(os.path.join(model_dir, fname+'_ANN'))
 
-    def evaluate(self, true_labels, predicted_labels, filter_map=None):
-        def _filter(pred, mapping):
-            if mapping is not None and len(mapping) > 0:
-                pred[mapping[:, 0], mapping[:, 1]] = 0
-                pred.eliminate_zeros()
-            return pred
+    def load(self, model_dir, fname, *args):
+        """
+        Load model from disk
+        * uses prefix: _network.pkl for network
 
-        if issparse(predicted_labels):
-            return self._evaluate(
-                true_labels, _filter(predicted_labels, filter_map))
-        else:  # Multiple set of predictions
-            acc = {}
-            for key, val in predicted_labels.items():
-                acc[key] = self._evaluate(
-                    true_labels, _filter(val, filter_map))
-            return acc
+        Arguments:
+        ---------
+        model_dir: str
+            load model from this directory
+        fname: str
+            load model with this file name
+        """
+        super().load(model_dir, fname)
+        if self.shortlister is not None:
+            self.shortlister.load(os.path.join(model_dir, fname+'_ANN'))
 
     @property
     def model_size(self):

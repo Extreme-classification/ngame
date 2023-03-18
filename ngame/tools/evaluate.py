@@ -1,3 +1,5 @@
+# Example to evaluate
+import sys
 import xclib.evaluation.xc_metrics as xc_metrics
 import xclib.data.data_utils as data_utils
 from scipy.sparse import load_npz, save_npz

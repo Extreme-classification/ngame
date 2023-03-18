@@ -3,6 +3,58 @@ import torch.nn.functional as F
 import math
 
 
+def construct_loss(params, pos_weight=1.0):
+    """
+    Return the loss
+    Arguments:
+    ----------
+    params: NameSpace
+        parameters of the model
+        * mean: mean over all entries/terms (used with OVA setting)
+        * sum: sum over all entries/terms (used with a shortlist)
+               - the loss is then divided by batch_size resulting in
+                 sum over labels and mean over data-points in a batch
+    pos_weight: int or None, optional, default=None
+        weight the loss terms where y_nl = 1
+    """
+    _reduction = 'mean'
+    # pad index is for OVA training and not shortlist
+    # pass mask for shortlist
+    _pad_ind = None #if params.use_shortlist else params.label_padding_index
+    if params.loss == 'bce':
+        return BCEWithLogitsLoss(
+            reduction=_reduction,
+            pad_ind=_pad_ind,
+            pos_weight=None)
+    elif params.loss == 'triplet_margin_ohnm':
+        return TripletMarginLossOHNM(
+            reduction=_reduction,
+            apply_softmax=params.loss_agressive,
+            tau=0.1,
+            k=params.loss_num_negatives,
+            margin=params.margin)
+    elif params.loss == 'hinge_contrastive':
+        return HingeContrastiveLoss(
+            reduction=_reduction,
+            pos_weight=pos_weight,
+            margin=params.margin)
+    elif params.loss == 'prob_contrastive':
+        return ProbContrastiveLoss(
+            reduction=_reduction,
+            c=0.75,
+            d=3.0,
+            pos_weight=pos_weight,
+            threshold=params.margin)
+    elif params.loss == 'kprob_contrastive':
+        return kProbContrastiveLoss(
+            k=params.k,
+            reduction='custom',
+            c=0.9,
+            d=1.5,
+            apply_softmax=False,
+            pos_weight=pos_weight)
+
+
 class _Loss(torch.nn.Module):
     def __init__(self, reduction='mean', pad_ind=None):
         super(_Loss, self).__init__()

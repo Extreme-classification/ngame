@@ -61,27 +61,6 @@ class Parameters(ParametersBase):
             type=int,
             help='Start training from here')
         self.parser.add_argument(
-            '--model_method',
-            dest='model_method',
-            default='full',
-            action='store',
-            type=str,
-            help='Model method (full/shortlist/embedding)')
-        self.parser.add_argument(
-            '--shortlist_method',
-            dest='shortlist_method',
-            default='static',
-            action='store',
-            type=str,
-            help='static/dynamic/hybrid')
-        self.parser.add_argument(
-            '--ns_method',
-            dest='ns_method',
-            default='ensemble',
-            action='store',
-            type=str,
-            help='centroid/ensemble')
-        self.parser.add_argument(
             '--ann_method',
             dest='ann_method',
             default='hnswlib',
@@ -158,12 +137,6 @@ class Parameters(ParametersBase):
             default=100,
             type=int,
             help='M')
-        self.parser.add_argument(
-            '--retrain_hnsw_after',
-            action='store',
-            default=1,
-            type=int,
-            help='Retrain HSNW after these many epochs!')
         self.parser.add_argument(
             '--num_labels',
             dest='num_labels',
@@ -279,10 +252,10 @@ class Parameters(ParametersBase):
         self.parser.add_argument(
             '--network_type',
             dest='network_type',
-            default='embedding',
-            type=str,
+            default='xc',
             action='store',
-            help='Type of network: full/shortlist/embedding')
+            type=str,
+            help='Model method (siamese/xc)')
         self.parser.add_argument(
             '--beta',
             dest='beta',
@@ -297,13 +270,6 @@ class Parameters(ParametersBase):
             type=str,
             action='store',
             help='create batches on: doc/label')
-        self.parser.add_argument(
-            '--sampling_type',
-            dest='sampling_type',
-            default='batch',
-            type=str,
-            action='store',
-            help='Which sampling method to use: point/batch')
         self.parser.add_argument(
             '--label_padding_index',
             dest='label_padding_index',
@@ -330,13 +296,9 @@ class Parameters(ParametersBase):
             action='store_true',
             help='Keep labels which do not have any training instance!.')
         self.parser.add_argument(
-            '--freeze_intermediate',
+            '--freeze_encoder',
             action='store_true',
-            help='Do not train intermediate representation.')
-        self.parser.add_argument(
-            '--use_shortlist',
-            action='store_true',
-            help='Use shortlist or full')
+            help='Do not train the encoder')
         self.parser.add_argument(
             '--validate',
             action='store_true',
@@ -397,11 +359,6 @@ class Parameters(ParametersBase):
             '--use_pretrained_shortlist',
             action='store_true',
             help='Load shortlist from disk')
-        self.parser.add_argument(
-            '--use_coarse_for_shorty',
-            action='store_true',
-            help='Use coarse representation for shortlist'
-        )
         self.parser.add_argument(
             '--get_only',
             nargs='+',

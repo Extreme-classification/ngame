@@ -1,13 +1,32 @@
 import torch
 import math
 import models.transform_layer as transform_layer
-from .transformer_layer import STransformer
 import torch.nn as nn
 import torch.nn.functional as F
 from collections import OrderedDict
 import pickle
 import os
 import models.linear_layer as linear_layer
+
+
+def construct_network(args):
+    if args.network_type == 'siamese':
+        if args.sampling_type == "implicit":
+            net = SiameseXMLIS(args)
+        elif args.sampling_type == 'explicit':
+            raise NotImplementedError("")
+        else:
+            raise NotImplementedError("")
+    elif args.network_type == 'xc':
+        if args.sampling_type == "implicit":
+            net = DeepXMLIS(args)
+        elif args.sampling_type == 'explicit':
+            raise NotImplementedError("")
+        else:
+            raise NotImplementedError("")
+    else:
+        raise NotImplementedError("")
+    return net
 
 
 def _to_device(x, device):
@@ -20,7 +39,6 @@ def _to_device(x, device):
         return out
     else:
         return x.to(device)
-
 
 
 class DeepXMLBase(nn.Module):
@@ -109,12 +127,6 @@ class DeepXMLBase(nn.Module):
         """
         self.transform.initialize(x)
 
-    # def to(self):
-    #     """Send layers to respective devices
-    #     """
-    #     self.transform.to()
-    #     self.classifier.to()
-
     def purge(self, fname):
         if os.path.isfile(fname):
             os.remove(fname)
@@ -134,15 +146,14 @@ class DeepXMLBase(nn.Module):
         return f"{self.embeddings}\n(Transform): {self.transform}"
 
 
-
-class SiameseXML(DeepXMLBase):
+class SiameseXMLIS(DeepXMLBase):
     """
     Siamese to embed document and labels together
     * Allows different or same embeddings for documents and labels
     * Allows different or same transformation for documents and labels
     """
     def __init__(self, params, device="cuda"):
-        super(SiameseXML, self).__init__(None)
+        super(SiameseXMLIS, self).__init__(None)
         self.share_weights = params.share_weights
         self.metric = params.metric
         config_dict = transform_layer.fetch_json(
@@ -166,11 +177,7 @@ class SiameseXML(DeepXMLBase):
     def _create_shared_net(self):
         self.encoder_lbl = self.encoder
         
-    def encode(self, x, x_ind=None, return_coarse=False):
-        return self.encode_document(x, x_ind, return_coarse)
-
-    def encode_document(self, x=None, ind=None,
-                        mask=None, return_coarse=False):
+    def encode_document(self, x, return_encoder_rep=False):
         """Forward pass
         * Assumes features are dense if x_ind is None
         Arguments:
@@ -180,19 +187,18 @@ class SiameseXML(DeepXMLBase):
             (dense features) contains the dense representation of a point
         x_ind: torch.LongTensor or None, optional (default=None)
             contains indices of features (sparse features)
-        return_coarse: boolean, optional (default=False)
-            Return coarse features or not
+        return_encoder_rep: boolean, optional (default=False)
+            Return encoder representation or not
         Returns
         -------
         out: logits for each label
         """
-        encoding = self.encoder.encode(
-            _to_device((ind, mask), self.device))
-        if not return_coarse:
+        encoding = self.encoder.encode(_to_device(x, self.device))
+        if not return_encoder_rep:
             encoding = self.transform_doc(encoding)
         return encoding
 
-    def encode_label(self, x=None, ind=None, mask=None, return_coarse=False):
+    def encode_label(self, x, return_encoder_rep=False):
         """Forward pass
         * Assumes features are dense if x_ind is None
         Arguments:
@@ -202,15 +208,14 @@ class SiameseXML(DeepXMLBase):
             (dense features) contains the dense representation of a point
         x_ind: torch.LongTensor or None, optional (default=None)
             contains indices of features (sparse features)
-        return_coarse: boolean, optional (default=False)
+        return_encoder_rep: boolean, optional (default=False)
             Return coarse features or not
         Returns
         -------
         out: logits for each label
         """
-        encoding = self.encoder_lbl.encode(
-            _to_device((ind, mask), self.device))
-        if not return_coarse:
+        encoding = self.encoder_lbl.encode(_to_device(x, self.device))
+        if not return_encoder_rep:
             encoding = self.transform_lbl(encoding)
         return encoding
 
@@ -221,22 +226,10 @@ class SiameseXML(DeepXMLBase):
             lbl_rep = F.normalize(lbl_rep, dim=1)
         return doc_rep @ lbl_rep.T
 
-    def forward(self, data, *args, **kwargs):
-        ip_rep = self.encode_document(
-            ind=data['ip_ind'],
-            mask=data['ip_mask'])
-        op_rep = self.encode_label(
-            ind=data['op_ind'],
-            mask=data['op_mask'])
+    def forward(self, batch_data, *args, **kwargs):
+        ip_rep = self.encode_document(batch_data['X'])
+        op_rep = self.encode_label(batch_data['Z'])
         return self.similarity(ip_rep, op_rep), ip_rep
-
-    # def to(self):
-    #     """Send layers to respective devices
-    #     """
-    #     self.transform_fine_document.to()
-    #     self.transform_fine_label.to()
-    #     self.document_net.to()
-    #     self.label_net.to()
 
     def initialize(self, x):
         """Initialize parameters from existing ones
@@ -305,7 +298,7 @@ class SiameseXML(DeepXMLBase):
         return s
 
 
-class DeepXMLSS(DeepXMLBase):
+class DeepXMLIS(DeepXMLBase):
     """DeepXMLs: DeepXML architecture to be trained with
                  a shared shortlist
     * Allows additional transform layer for features
@@ -319,16 +312,15 @@ class DeepXMLSS(DeepXMLBase):
         self.representation_dims = int(
             config_dict['representation_dims'])
         self.metric = params.metric
-        super(DeepXMLSS, self).__init__(config_dict['encoder'])
-        if params.freeze_intermediate:
+        super(DeepXMLIS, self).__init__(config_dict['encoder'])
+        if params.freeze_encoder:
             for params in self.encoder.parameters():
                 params.requires_grad = False
         self.transform = self._construct_transform(
             config_dict['transform_doc'])
 
     def save_intermediate_model(self, fname):
-        out = {'encoder': self.encoder.state_dict()
-            }
+        out = {'encoder': self.encoder.state_dict()}
         torch.save(out, fname)
 
     def load_intermediate_model(self, fname):
@@ -348,16 +340,17 @@ class DeepXMLSS(DeepXMLBase):
         """
         return self.transform(_to_device(x, self.device))
 
-    def encode_document(self, x, ind=None, mask=None, return_coarse=False):
-        return self.encode(x, ind, mask, return_coarse)
+    def encode_document(self, x, ret_encoder_rep=False):
+        return self.encode(x, ret_encoder_rep)
 
-    def encode_label(self, x, ind=None, mask=None, return_coarse=False):
-        return self.encode(x, ind, mask, return_coarse)
+    def encode_label(self, x, ret_encoder_rep=False):
+        return self.encode(x, ret_encoder_rep)
 
-    def encode(self, x=None, ind=None, mask=None, bypass_fine=False):
+    def encode(self, x, ret_encoder_rep=False):
         #TODO: Implement stuff for non-shared arch
         """Forward pass
         * Assumes features are dense if x_ind is None
+
         Arguments:
         -----------
         x: torch.FloatTensor
@@ -365,17 +358,17 @@ class DeepXMLSS(DeepXMLBase):
             (dense features) contains the dense representation of a point
         x_ind: torch.LongTensor or None, optional (default=None)
             contains indices of features (sparse features)
-        bypass_fine: boolean, optional (default=False)
+        ret_encoder_rep: boolean, optional (default=False)
             Return coarse features or not
         Returns
         -------
         out: logits for each label
         """
         encoding = self.encoder.encode(
-            _to_device((ind, mask), self.device))
-        return encoding if bypass_fine else self.transform(encoding)
+            _to_device(x, self.device))
+        return encoding if ret_encoder_rep else self.transform(encoding)
 
-    def forward(self, batch_data, bypass_coarse=False):
+    def forward(self, batch_data, bypass_encoder=False):
         """Forward pass
         * Assumes features are dense if X_w is None
         * By default classifier is identity op
@@ -390,13 +383,11 @@ class DeepXMLSS(DeepXMLBase):
         -------
         out: logits for each label
         """
-        if bypass_coarse:
-            return self.classifier(
-                self.encode_transform(batch_data['X']), batch_data['Y_s'])
+        if bypass_encoder:
+            X = self.encode_transform(batch_data['X'])
         else:
-            return self.classifier(
-                self.encode(ind=batch_data['ind'], mask=batch_data['mask']),
-                batch_data['Y_s'])
+            X = self.encode(batch_data['X'])
+        return self.classifier(X, batch_data['Y_s']), X
 
     def _construct_classifier(self):
         offset = 0
@@ -416,14 +407,9 @@ class DeepXMLSS(DeepXMLBase):
                 padding_idx=self.label_padding_index,
                 bias=True)
 
-    # def to(self):
-    #     """Send layers to respective devices
-    #     """
-    #     self.transform_fine.to()
-    #     super().to()
-
     def initialize_classifier(self, weight, bias=None):
         """Initialize classifier from existing weights
+
         Arguments:
         -----------
         weight: numpy.ndarray
@@ -445,63 +431,3 @@ class DeepXMLSS(DeepXMLBase):
         s += f"\n(Classifier): {self.classifier}\n"
         return s
 
-# class Network(torch.nn.Module):
-
-#     def __init__(self, transformer, config=None, projection_dims=-1, metric='cosine', device="cuda"):
-#         super(Network, self).__init__()
-#         self.encoder = self._construct_transform(transformer, config)
-#         if projection_dims != -1:
-#             self.transform = torch.nn.Linear(self.encoder.repr_dims, projection_dims)
-#             self.representation_dims = projection_dims
-#         else:
-#             self.transform = torch.nn.Identity()
-#             self.representation_dims = self.encoder.repr_dims
-#         self.metric = metric
-#         self.device = torch.device(device)
-#         print(self.encoder)
-
-#     def _construct_transform(self, transformer, config):
-#         return STransformer(transformer)
-
-#     @property
-#     def representation_dims(self):
-#         return self._repr_dims
-
-#     @representation_dims.setter
-#     def representation_dims(self, dims):
-#         self._repr_dims = dims
-
-#     def encode_document(self, data, *args):
-#         return self.encode(data['ind'], data['mask'])
-
-#     def encode_label(self, data, *args):
-#         return self.encode(data['ind'], data['mask'])
-
-#     def encode(self, x_ind, x_mask):
-#         return self.encoder(x_ind.to(self.device), x_mask.to(self.device))
-
-#     def similarity(self, ip_rep, op_rep):
-#         #  Units vectors in case of cosine similarity
-#         if self.metric == 'cosine':
-#             ip_rep = F.normalize(ip_rep, dim=1)
-#             op_rep = F.normalize(op_rep, dim=1)
-#         return ip_rep @ op_rep.T
-
-#     def forward(self, data, *args):
-#         ip_rep = self.encode(data['ip_ind'], data['ip_mask'])
-#         op_rep = self.encode(data['op_ind'], data['op_mask'])
-#         return self.similarity(ip_rep, op_rep), ip_rep
-
-#     @property
-#     def num_params(self, ignore_fixed=False):
-#         if ignore_fixed:
-#             return sum(p.numel() for p in self.parameters() if p.requires_grad)
-#         else:
-#             return sum(p.numel() for p in self.parameters())
-
-#     @property
-#     def model_size(self):  # Assumptions: 32bit floats
-#         return self.num_params * 4 / math.pow(2, 20)
-
-#     def __repr__(self):
-#         return f"(Transform): {self.transform}"

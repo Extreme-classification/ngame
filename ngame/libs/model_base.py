@@ -8,13 +8,14 @@ from torch.utils.data import DataLoader
 import numpy as np
 import xclib.evaluation.xc_metrics as xc_metrics
 import sys
-# from .dataset import construct_dataset
-from .collate_fn import construct_collate_fn
+from .dataset import construct_dataset
+from .collate_fn import collate
 from .tracking import Tracking
 import torch.utils.data
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from xclib.utils.matrix import SMatrix
+from .utils import filter_predictions
 
 
 class ModelBase(object):
@@ -41,9 +42,6 @@ class ModelBase(object):
         schedular,
         model_dir,
         result_dir,
-        freeze_intermediate=False,
-        feature_type='sparse',
-        use_amp=False,
         *args,
         **kwargs
     ):
@@ -55,16 +53,14 @@ class ModelBase(object):
         self.last_saved_epoch = -1
         self.model_dir = model_dir
         self.result_dir = result_dir
-        # self.label_padding_index = params.label_padding_index
         self.last_epoch = 0
-        self.feature_type = feature_type
-        # self.shortlist_size = params.num_nbrs if params.use_shortlist else -1
-        self.freeze_intermediate = freeze_intermediate
         self.model_fname = "model"
         self.logger = self.get_logger(name=self.model_fname)
         self.devices = -1 #self._create_devices(params.devices)
         self.tracking = Tracking()
         self.scaler = None
+
+    def setup_amp(self, use_amp):
         if use_amp:
             self.scaler = torch.cuda.amp.GradScaler()
 
@@ -76,20 +72,22 @@ class ModelBase(object):
         data_dir,
         fname,
         data=None,
-        mode='predict',
+        model_dir='',
+        mode='train',
+        sampling_params=None,
         normalize_features=True,
-        normalize_labels=False,
-        feature_type='sparse',
+        normalize_labels=True,
         keep_invalid=False,
+        feature_type='sparse',
         feature_indices=None,
         label_indices=None,
-        size_shortlist=-1,
-        shortlist_method='static',
-        shorty=None,
-        surrogate_mapping=None,
-        _type='full',
-        pretrained_shortlist=None
-    ):
+        label_feature_indices=None,
+        batch_type='label',
+        negative_sampler=None,
+        max_len=-1,
+        classifier_type='xc',
+        precomputed_negatives=None,
+        surrogate_mapping=None):
         """
         Create dataset as per given data and parameters
         Arguments
@@ -141,33 +139,41 @@ class ModelBase(object):
             return dataset created using given data and parameters
         """
         return construct_dataset(
-            data_dir=data_dir,
-            fname=fname,
+            data_dir,
+            fname,
             data=data,
-            model_dir=self.model_dir,
+            model_dir=model_dir,
             mode=mode,
-            size_shortlist=size_shortlist,
+            sampling_params=sampling_params,
+            max_len=max_len,
             normalize_features=normalize_features,
             normalize_labels=normalize_labels,
             keep_invalid=keep_invalid,
             feature_type=feature_type,
             feature_indices=feature_indices,
             label_indices=label_indices,
-            shortlist_method=shortlist_method,
-            shorty=shorty,
+            label_feature_indices=label_feature_indices,
+            negative_sampler=negative_sampler,
+            batch_type=batch_type,
+            precomputed_negatives=precomputed_negatives,
             surrogate_mapping=surrogate_mapping,
-            pretrained_shortlist=pretrained_shortlist,
-            _type=_type)
+            classifier_type=classifier_type
+        )
+
+    def create_batch_sampler(self, *args, **kwargs):
+        return None
 
     def _create_data_loader(
         self,
         dataset,
+        prefetch_factor=5,
         batch_size=128,
         feature_type='sparse',
-        classifier_type='full',
+        sampling_type='brute',
+        classifier_type='xc',
         num_workers=4,
         shuffle=False, 
-        mode='predict'
+        **kwargs
     ):
         """
         Create data loader for given dataset
@@ -188,14 +194,35 @@ class ModelBase(object):
         classifier_type: str, optional, default='full'
             OVA or a classifier with shortlist
         """
-        dt_loader = DataLoader(
-            dataset,
-            batch_size=batch_size,
-            num_workers=num_workers,
-            collate_fn=construct_collate_fn(
-                feature_type, classifier_type),
-            shuffle=shuffle)
+        batch_sampler = self.create_batch_sampler(
+                dataset, batch_size, shuffle
+            )
+        if batch_sampler is not None:
+            dt_loader = DataLoader(
+                dataset,
+                batch_sampler=batch_sampler,
+                prefetch_factor=prefetch_factor,
+                num_workers=num_workers,
+                collate_fn=self._create_collate_fn(
+                    feature_type, classifier_type, sampling_type))
+        else:
+            dt_loader = DataLoader(
+                dataset,
+                batch_size=batch_size,
+                prefetch_factor=prefetch_factor,
+                num_workers=num_workers,
+                shuffle=shuffle,
+                collate_fn=self._create_collate_fn(
+                    feature_type, classifier_type, sampling_type))
         return dt_loader
+
+    def _create_collate_fn(self, feature_type, classifier_type, sampling_type):
+        if classifier_type == 'siamese':
+            op_feature_type = feature_type
+        else:
+            op_feature_type = None
+        return collate(
+                   feature_type, classifier_type, sampling_type, op_feature_type)
 
     def get_logger(self, name='SiameseXML', level=logging.INFO):
         """
@@ -210,7 +237,7 @@ class ModelBase(object):
         logger.setLevel(level=level)
         return logger
 
-    def _compute_loss(self, _pred, batch_data, weightage=1.0):
+    def _compute_loss(self, _pred, batch_data):
         """
             Compute loss for one classifier
         """
@@ -329,8 +356,6 @@ class ModelBase(object):
             out_ans = self.net.forward(batch_data)
             loss = self._compute_loss(out_ans, batch_data)
             mean_loss += loss.item()*batch_size
-            if self.num_clf_partitions > 1:
-                out_ans = torch.cat(out_ans, dim=1)
             vals, ind = torch.topk(out_ans, k=top_k, dim=-1, sorted=False)
             predicted_labels.update_block(
                 count, ind.cpu().numpy(), vals.cpu().numpy())
@@ -709,8 +734,6 @@ class ModelBase(object):
         for batch_data in tqdm(data_loader):
             batch_size = batch_data['batch_size']
             out_ans = self.net.forward(batch_data)
-            if self.num_clf_partitions > 1:
-                out_ans = torch.cat(out_ans, dim=1)
             vals, ind = torch.topk(out_ans, k=top_k, dim=-1, sorted=False)
             predicted_labels.update_block(
                 count, ind.cpu().numpy(), vals.cpu().numpy())
@@ -762,10 +785,7 @@ class ModelBase(object):
         for batch_data in tqdm(data_loader):
             batch_size = batch_data['batch_size']
             out_ans = encoder(
-                batch_data['X'],
-                batch_data['ind'],
-                batch_data['mask'],
-                use_intermediate)
+                batch_data['X'], use_intermediate)
             embeddings[count:count+batch_size,
                        :] = out_ans.detach().cpu().numpy()
             count += batch_size
@@ -822,16 +842,21 @@ class ModelBase(object):
             assert data_dir is not None and fname is not None, \
                 "valid file path is required when data is not passed"
         dataset = self._create_dataset(
-            data_dir, fname=fname,
-            data=data, normalize_features=normalize,
+            data_dir,
+            fname=fname,
+            data=data,
+            normalize_features=normalize,
             feature_type=feature_type,
-            feature_indices=indices, _type='tensor')
+            feature_indices=indices,
+            classifier_type=None)
         data_loader = DataLoader(
             dataset,
             batch_size=batch_size,
             num_workers=num_workers,
-            collate_fn=construct_collate_fn(
-                feature_type=feature_type, classifier_type='None'),
+            collate_fn=self._create_collate_fn(
+                feature_type=feature_type,
+                classifier_type=None,
+                sampling_type=None),
             shuffle=False)
         return self._embeddings(data_loader, encoder, use_intermediate, fname_out)
 
@@ -936,7 +961,7 @@ class ModelBase(object):
         acc = acc.eval(predicted_labels.tocsr(), 5)
         return acc
 
-    def evaluate(self, true_labels, predicted_labels):
+    def evaluate(self, true_labels, predicted_labels, filter_map=None):
         """
         Compute precision and ndcg for given prediction matrix
 
@@ -946,7 +971,9 @@ class ModelBase(object):
             ground truth matrix
         predicted_labels: csr_matrix or dict
             predictions matrix (expect dictionary in case of multiple)
-
+        filter_labels: np.ndarray or None, optional (default=None)
+            filter predictions based on a given mapping
+            
         Returns
         --------
         acc: list or dict of list
@@ -954,11 +981,13 @@ class ModelBase(object):
             * output dictionary uses same keys as input
         """
         if issparse(predicted_labels):
-            return self._evaluate(true_labels, predicted_labels)
+            return self._evaluate(
+                true_labels, filter_predictions(predicted_labels, filter_map))
         else:  # Multiple set of predictions
             acc = {}
             for key, val in predicted_labels.items():
-                acc[key] = self._evaluate(true_labels, val)
+                acc[key] = self._evaluate(
+                    true_labels, filter_predictions(val, filter_map))
             return acc
 
     @property
@@ -967,3 +996,4 @@ class ModelBase(object):
         Return model size (in MB)
         """
         return self.net.model_size
+    

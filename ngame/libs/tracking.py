@@ -16,6 +16,7 @@ class Tracking(object):
         self.train_time = 0
         self.validation_time = 0
         self.shortlist_time = 0
+        self.sampling_time = 0
         self.saved_checkpoints = []
         self.last_saved_epoch = -1
         self.last_epoch = 0

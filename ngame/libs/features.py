@@ -4,7 +4,8 @@ import os
 import numpy as np
 
 
-def construct(data_dir, fname, X=None, normalize=False, _type='sparse'):
+def construct(data_dir, fname, X=None, normalize=False,
+              _type='sparse', max_len=32):
     """Construct feature class based on given parameters
     Arguments
     ----------
@@ -20,13 +21,15 @@ def construct(data_dir, fname, X=None, normalize=False, _type='sparse'):
         -sparse
         -dense
         -sequential
+    max_len: 32, optional, default=32
+        max length in sequential features
     """
     if _type == 'sparse':
         return _SparseFeatures(data_dir, fname, X, normalize)
     elif _type == 'dense':
         return DenseFeatures(data_dir, fname, X, normalize)
     elif _type == 'sequential':
-        return SeqFeatures(data_dir, fname, X)
+        return SeqFeatures(data_dir, fname, X, max_len)
     else:
         raise NotImplementedError("Unknown feature type")
 
@@ -45,10 +48,12 @@ class SeqFeatures(SparseFeatures):
         data is already provided
     normalize: boolean, optional, default=False
         Normalize the data or not
+    max_len: 32, optional, default=32
+        max length in sequential features
     """
-
-    def __init__(self, data_dir, fname, X=None):
+    def __init__(self, data_dir, fname, X=None, max_len=-1):
         super().__init__(data_dir, fname, X)
+        self.max_len = max_len
 
     def load(self, data_dir, fname, X):
         """
@@ -71,7 +76,11 @@ class SeqFeatures(SparseFeatures):
         return self.X
 
     def __getitem__(self, index):
-        return self.X[0][index], self.X[1][index]
+        if self.max_len > 0:
+            return self.X[0][index][:self.max_len], \
+                self.X[1][index][:self.max_len]
+        else:
+            return (self.X[0][index], self.X[1][index])
 
     @property
     def num_instances(self):
@@ -80,6 +89,10 @@ class SeqFeatures(SparseFeatures):
     @property
     def num_features(self):
         return -1
+
+    @property
+    def _type(self):
+        return 'sequential'
 
 
 class _SparseFeatures(SparseFeatures):
@@ -106,3 +119,7 @@ class _SparseFeatures(SparseFeatures):
         x = self.X[index].indices + 1
         w = self.X[index].data
         return x, w
+
+    @property
+    def _type(self):
+        return 'sparse'
