@@ -3,6 +3,11 @@ import torch
 from torch.nn.utils.rnn import pad_sequence
 
 
+def clip_batch_lengths(ind, mask, max_len=1000000):
+    _max = min(np.max(np.sum(mask, axis=1)), max_len)
+    return ind[:, :_max], mask[:, :_max]
+
+
 def pad_and_collate(x, pad_val=0, dtype=torch.FloatTensor):
     """
     A generalized function for padding batch using utils.rnn.pad_sequence
@@ -103,11 +108,33 @@ def collate_sequential(x):
     x = list(x)
     indices = collate_dense(map(lambda z: z[0], x), dtype=torch.LongTensor)
     mask = collate_dense(map(lambda z: z[1], x), dtype=torch.LongTensor)
-    return indices, mask
+    return clip_batch_lengths(indices, mask)
 
 
 def collate_brute(batch):
     return collate_dense(batch), None, None
+
+
+def collate_implicit_multi_pos(batch):
+    batch_labels = []
+    unique_labels = set([])
+    for item in batch:
+        batch_labels.append(item[1])
+        unique_labels.update(item[1].tolist())
+    unique_labels_l = list(unique_labels)
+    label_2_id = {x: i for i, x in enumerate(unique_labels_l)}
+
+    batch_selection =  np.zeros(
+        (len(batch_labels), len(unique_labels)), dtype=np.float32)
+    for i, item in enumerate(batch_labels):
+        intersection = unique_labels.intersection(item)
+        result = np.zeros(len(unique_labels))
+        for idx in intersection:
+            result[label_2_id[idx]] = 1
+        batch_selection[i] = result
+    
+    return torch.from_numpy(batch_selection), \
+        torch.LongTensor(unique_labels_l), None
 
 
 def collate_implicit(batch):
@@ -141,11 +168,6 @@ def get_iterator(x, ind=None):
         return map(lambda z: z, x)
     else:
         return map(lambda z: z[ind], x)
-
-
-def clip_batch_lengths(ind, mask):
-    _max = np.max(np.sum(mask, axis=1))
-    return ind[:, :_max], mask[:, :_max]
 
 
 class collate():
@@ -190,7 +212,10 @@ class collate():
             return None
 
         if sampling_t == 'implicit':
-            return collate_implicit
+            if classifier_t == 'xc':
+                return collate_implicit_multi_pos
+            else:
+                return collate_implicit
         elif sampling_t == 'explicit':
             raise NotImplementedError("")
         elif sampling_t == 'brute':

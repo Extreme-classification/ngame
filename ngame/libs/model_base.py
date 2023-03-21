@@ -436,7 +436,7 @@ class ModelBase(object):
             os.path.join(self.result_dir, 'training_statistics.pkl'))
         self.logger.info(
             "Training time: {:.2f} sec, Validation time: {:.2f} sec"
-            ", Shortlist time: {:.2f} sec, Model size: {:.2f} MB".format(
+            ", Shortlist time: {:.2f} sec, Model size: {:.2f} MB\n".format(
                 self.tracking.train_time, self.tracking.validation_time,
                 self.tracking.shortlist_time, self.model_size))
 

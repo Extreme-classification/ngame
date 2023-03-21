@@ -38,6 +38,8 @@ def train(model, args):
         max_len=args.max_length,
         feature_type=args.feature_type,
         label_type='sparse',
+        use_amp=args.use_amp,
+        freeze_encoder=args.freeze_encoder,
         validate_after=args.validate_after,
         filter_file_val=args.val_filter_fname,
         num_epochs=args.num_epochs,
@@ -69,7 +71,7 @@ def inference(model, args):
         model_dir=args.model_dir,
         max_len=args.max_length,
         filter_map=args.filter_map,
-        batch_size=args.batch_size*2)
+        batch_size=args.batch_size*4)
     model.save(args.model_dir, args.model_fname)
     utils.save_predictions(
         preds=predicted_labels,

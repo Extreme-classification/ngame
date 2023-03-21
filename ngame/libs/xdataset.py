@@ -68,6 +68,6 @@ class DatasetBDIS(DatasetSampling):
         """Get a label at index"""
         doc_ft = self.features[index]
         pos_indices, _ = self.labels[index]
-        sampled_pos_ind = np.random.choice(pos_indices)
-        return (doc_ft, (sampled_pos_ind, pos_indices), index)
+        # sampled_pos_ind = np.random.choice(pos_indices)
+        return (doc_ft, (None, pos_indices), index)
  

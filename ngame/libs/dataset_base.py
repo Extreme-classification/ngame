@@ -121,7 +121,7 @@ class DatasetBase(torch.utils.data.Dataset):
         labels = self.load_labels(
             data_dir, f_labels, data['Y'], normalize_labels, label_type)
         label_features = None
-        if f_label_features is not None:
+        if f_label_features is not None or data["Yf"] is not None:
             label_features = self.load_features(
                 data_dir, f_label_features, data['Yf'],
                 normalize_features, feature_type, max_len)

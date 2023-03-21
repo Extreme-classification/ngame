@@ -326,7 +326,10 @@ class DeepXMLIS(DeepXMLBase):
     def load_intermediate_model(self, fname):
         self.encoder.load_state_dict(torch.load(fname)['encoder'])
 
-    def encode_transform(self, x):
+    def _encode(self, x, *args, **kwargs):
+        return self.encoder.encode(_to_device(x, self.device))
+
+    def _encode_transform(self, x, *args, **kwargs):
         """Forward pass (assumes input is intermediate computation)
         Arguments:
         -----------
@@ -384,7 +387,7 @@ class DeepXMLIS(DeepXMLBase):
         out: logits for each label
         """
         if bypass_encoder:
-            X = self.encode_transform(batch_data['X'])
+            X = self._encode_transform(batch_data['X'])
         else:
             X = self.encode(batch_data['X'])
         return self.classifier(X, batch_data['Y_s']), X
@@ -426,7 +429,7 @@ class DeepXMLIS(DeepXMLBase):
         return self.classifier.get_weights()
 
     def __repr__(self):
-        s = f"{self.encoder}\n"
+        s = f"(Encoder): {self.encoder}\n"
         s += f"(Transform): {self.transform}"
         s += f"\n(Classifier): {self.classifier}\n"
         return s

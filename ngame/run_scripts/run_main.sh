@@ -4,7 +4,7 @@
 # $3 Dataset
 # $4 version
 # $5 seed
-# eg. ./run_main.sh 0 NGAME EURLex-4K 0 22
+# eg. ./run_main.sh 0 NGAME LF-AmazonTitles-131K 0 22
 
 export CUDA_VISIBLE_DEVICES=$1
 model_type=$2
@@ -15,4 +15,4 @@ seed=$5
 work_dir=$(cd ../../../../ && pwd)
 
 current_working_dir=$(pwd)
-python3 ../runner.py "${model_type}" "${work_dir}" ${version} "$(dirname "$current_working_dir")/configs/${model_type}/${dataset}.json" "${seed}"
+python3 -W ignore ../runner.py "${model_type}" "${work_dir}" ${version} "$(dirname "$current_working_dir")/configs/${model_type}/${dataset}.json" "${seed}"

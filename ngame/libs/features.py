@@ -1,4 +1,5 @@
-from xclib.data.features import DenseFeatures, SparseFeatures, FeaturesBase
+from xclib.data.features import SparseFeatures
+from xclib.data.features import DenseFeatures as _DenseFeatures
 from xclib.data import data_utils
 import os
 import numpy as np
@@ -93,6 +94,12 @@ class SeqFeatures(SparseFeatures):
     @property
     def _type(self):
         return 'sequential'
+
+
+class DenseFeatures(_DenseFeatures):
+    @property
+    def _type(self):
+        return 'dense'
 
 
 class _SparseFeatures(SparseFeatures):

@@ -5,8 +5,7 @@ def construct_optimizer(params, net):
     if params.optim == 'Adam':
         return torch.optim.SparseAdam(
             list(net.classifier.parameters()),
-            lr=params.learning_rate,
-            eps=1e-06)
+            lr=params.learning_rate)
     elif params.optim == 'AdamW':
         return torch.optim.AdamW(
             net.parameters(),

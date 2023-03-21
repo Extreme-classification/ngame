@@ -107,7 +107,7 @@ class ModelIS(ModelBase):
         data_loader.batch_sampler.sampler.update_order(
             data_loader.dataset.indices_permutation())
 
-    def _step_amp(self, data_loader, precomputed_intermediate=False):
+    def _step_amp(self, data_loader, precomputed_encoder_rep=False):
         """
         Training step (one pass over dataset)
 
@@ -118,9 +118,9 @@ class ModelIS(ModelBase):
         batch_div: boolean, optional, default=False
             divide the loss with batch size?
             * useful when loss is sum over instances and labels
-        precomputed_intermediate: boolean, optional, default=False
-            if precomputed intermediate features are already available
-            * avoid recomputation of intermediate features
+        precomputed_encoder_rep: boolean, optional, default=False
+            if precomputed encoder features are already available
+            * avoid recomputation of encoder features
 
         Returns
         -------
@@ -136,7 +136,7 @@ class ModelIS(ModelBase):
             batch_size = batch_data['batch_size']
             with torch.cuda.amp.autocast():
                 out_ans, rep = self.net.forward(
-                    batch_data, precomputed_intermediate)
+                    batch_data, precomputed_encoder_rep)
                 loss = self._compute_loss(out_ans, batch_data)
             if self.memory_bank is not None:
                 ind = batch_data['indices']
@@ -151,7 +151,7 @@ class ModelIS(ModelBase):
             del batch_data
         return mean_loss / data_loader.dataset.num_instances
 
-    def _step(self, data_loader, precomputed_intermediate=False):
+    def _step(self, data_loader, precomputed_encoder_rep=False):
         """
         Training step (one pass over dataset)
 
@@ -162,9 +162,9 @@ class ModelIS(ModelBase):
         batch_div: boolean, optional, default=False
             divide the loss with batch size?
             * useful when loss is sum over instances and labels
-        precomputed_intermediate: boolean, optional, default=False
-            if precomputed intermediate features are already available
-            * avoid recomputation of intermediate features
+        precomputed_encoder_rep: boolean, optional, default=False
+            if precomputed encoder features are already available
+            * avoid recomputation of encoder features
 
         Returns
         -------
@@ -179,7 +179,7 @@ class ModelIS(ModelBase):
             self.optimizer.zero_grad()
             batch_size = batch_data['batch_size']
             out_ans, rep = self.net.forward(
-                batch_data, precomputed_intermediate)
+                batch_data, precomputed_encoder_rep)
             if self.memory_bank is not None:
                 ind = batch_data['indices']
                 self.memory_bank[ind] = rep.detach().cpu().numpy()
@@ -644,7 +644,8 @@ class XModelIS(ModelIS):
              validate_after,
              beta,
              sampling_params,
-             filter_map):
+             filter_map,
+             precomputed_encoder_rep):
         """
         Train for the given data loader
         Arguments
@@ -666,6 +667,9 @@ class XModelIS(ModelIS):
             mapping to filter the predictions
         sampling_params: Namespace or None
             parameters to be used for negative sampling
+        precomputed_encoder_rep: boolean, optional, default=False
+            if precomputed encoder features are already available
+            * avoid recomputation of encoder features
         """
         smp_warmup = sampling_params.curr_epochs[0]
         smp_refresh_interval = sampling_params.refresh_interval
@@ -674,9 +678,13 @@ class XModelIS(ModelIS):
             if epoch >= smp_warmup and epoch % smp_refresh_interval == 0:
                 sampling_time = time.time()
                 if self.memory_bank is None:
+                    if precomputed_encoder_rep:
+                        encoder = self.net._encode_transform
+                    else:
+                        encoder=self.net.encode_document,
                     _X = self.get_embeddings(
                         data=train_loader.dataset.features.data,
-                        encoder=self.net.encode_document,
+                        encoder=encoder,
                         batch_size=train_loader.batch_sampler.batch_size,
                         feature_type=train_loader.dataset.feature_type
                         )
@@ -690,9 +698,11 @@ class XModelIS(ModelIS):
 
             batch_train_start_time = time.time()
             if self.scaler is None:
-                tr_avg_loss = self._step(train_loader)
+                tr_avg_loss = self._step(
+                    train_loader, precomputed_encoder_rep)
             else:
-                tr_avg_loss = self._step_amp(train_loader)
+                tr_avg_loss = self._step_amp(
+                    train_loader, precomputed_encoder_rep)
             self.tracking.mean_train_loss.append(tr_avg_loss)
             batch_train_end_time = time.time()
             self.tracking.train_time = self.tracking.train_time + \
@@ -731,7 +741,7 @@ class XModelIS(ModelIS):
     def init_classifier(self, dataset, batch_size=128):
         lbl_embeddings = self.get_embeddings(
             data=dataset.label_features.data,
-            encoder=self.net.encode_label,
+            encoder=self.net._encode,
             batch_size=batch_size,
             feature_type=dataset.feature_type
             )
@@ -754,12 +764,12 @@ class XModelIS(ModelIS):
             normalize_labels=False,
             sampling_params=None,
             freeze_encoder=False,
-            use_amp=True,
+            use_amp=False,
             num_epochs=10,
             init_epoch=0,
             batch_size=128,
             num_workers=6,
-            shuffle=False,
+            shuffle=True,
             validate=False,
             validate_after=5,
             batch_type='doc',
@@ -864,51 +874,50 @@ class XModelIS(ModelIS):
             classifier_type='xc',
             sampling_type=sampling_params.type,
             shuffle=shuffle)
-        precomputed_intermediate = False
-        # if self.freeze_intermediate or not self.update_shortlist:
-        #     self.retrain_hnsw_after = 10000
+        precomputed_encoder_rep = False
 
         # No need to update embeddings
-        # if self.freeze_intermediate and feature_type != 'dense':
-        #     precomputed_intermediate = True
-        #     self.logger.info(
-        #         "Computing and reusing intermediate document embeddings "
-        #         "to save computations.")
-        #     data = {'X': None, 'Y': None}
-        #     data['X'] = self.get_embeddings(
-        #         data_dir=None,
-        #         encoder=self.net.encode_label,
-        #         fname=None,
-        #         data=train_dataset.features.data,
-        #         use_intermediate=True)
-        #     data['Yf'] = self.get_embeddings(
-        #         data_dir=None,
-        #         encoder=self.net.encode_document,
-        #         fname=None,
-        #         data=train_dataset.label_features.data,
-        #         use_intermediate=True)
-        #     data['Y'] = train_dataset.labels.data
-        #     _train_dataset = train_dataset
-        #     train_dataset = self._create_dataset(
-        #         os.path.join(data_dir, dataset),
-        #         data=data,
-        #         fname_features=None,
-        #         fname_label_features=None,
-        #         mode='train',
-        #         normalize_features=False,  # do not normalize dense features
-        #         shortlist_method=shortlist_method,
-        #         size_shortlist=self.shortlist_size,
-        #         feature_type='dense',
-        #         pretrained_shortlist=trn_pretrained_shortlist,
-        #         keep_invalid=True,   # Invalid labels already removed
-        #         _type='shortlist')
-        #     train_loader = self._create_data_loader(
-        #         train_dataset,
-        #         feature_type='dense',
-        #         classifier_type='shortlist',
-        #         batch_size=batch_size,
-        #         num_workers=num_workers,
-        #         shuffle=shuffle)
+        if freeze_encoder and feature_type:
+            precomputed_encoder_rep = True
+            self.logger.info(
+                "Computing and reusing encoder representations "
+                "to save computations.")
+            data = {}
+            data['X'] = self.get_embeddings(
+                data=train_dataset.features.data,
+                encoder=self.net._encode,
+                batch_size=batch_size,
+                feature_type=train_dataset.feature_type
+            )
+            data['Yf'] = self.get_embeddings(
+                data=train_dataset.label_features.data,
+                encoder=self.net._encode,
+                batch_size=batch_size,
+                feature_type=train_dataset.feature_type)
+
+            data['Y'] = train_dataset.labels.data
+            _train_dataset = train_dataset
+
+            train_dataset = self._create_dataset(
+                data_dir=os.path.join(data_dir, dataset),
+                data=data,
+                fname=None,
+                mode='train',
+                normalize_features=normalize_features, #TODO
+                normalize_labels=normalize_labels,
+                sampling_params=sampling_params,
+                feature_type='dense',
+                classifier_type='xc',
+                batch_type=batch_type
+            )
+            train_loader = self._create_data_loader(
+                train_dataset,
+                feature_type='dense',
+                classifier_type='xc',
+                batch_size=batch_size,
+                num_workers=num_workers,
+                sampling_type=sampling_params.type,
+                shuffle=shuffle)
         self.logger.info("Loading validation data.")
         validation_loader = None
         filter_map = None
@@ -942,10 +951,12 @@ class XModelIS(ModelIS):
             validate_after=validate_after,
             beta=beta,
             sampling_params=sampling_params,
-            filter_map=filter_map)
+            filter_map=filter_map,
+            precomputed_encoder_rep=precomputed_encoder_rep)
 
         # learn anns over label embeddings and label classifiers
-        self.post_process_for_inference(train_dataset, batch_size)
+        self.post_process_for_inference(
+            train_dataset, batch_size, precomputed_encoder_rep)
         train_time = self.tracking.train_time \
             + self.tracking.shortlist_time \
             + self.tracking.sampling_time
@@ -962,13 +973,18 @@ class XModelIS(ModelIS):
                 self.model_size))
         return train_time, self.model_size
 
-    def post_process_for_inference(self, dataset, batch_size=128):
+    def post_process_for_inference(
+            self, dataset, batch_size=128, precomputed_encoder_rep=False):
         start_time = time.time()
         self.net.eval()
         torch.set_grad_enabled(False)
+        if precomputed_encoder_rep: # precomputed encoder representation
+            encoder = self.net._encode_transform
+        else:
+            encoder = self.net.encode_label
         embeddings = self.get_embeddings(
             data=dataset.label_features.data,
-            encoder=self.net.encode_label,
+            encoder=encoder,
             batch_size=batch_size,
             feature_type=dataset.feature_type
             )
@@ -1038,6 +1054,7 @@ class XModelIS(ModelIS):
                 normalize_labels=False,
                 beta=0.2,
                 top_k=100,
+                freeze_encoder=False,
                 feature_type='sparse',
                 filter_map=None,
                 **kwargs):
@@ -1118,7 +1135,7 @@ class XModelIS(ModelIS):
         self.logger.info(
             "Prediction time (total): {:.2f} sec., "
             "Prediction time (per sample): {:.2f} msec., "
-            "P@k(%): {:s}".format(
+            "P@k(%): {:s}\n".format(
                 prediction_time,
                 avg_prediction_time, _res))
         return predicted_labels, prediction_time, avg_prediction_time
@@ -1135,9 +1152,9 @@ class XModelIS(ModelIS):
         fname: str
             save model with this file name
         """
-        super().load(model_dir, fname)
+        super().save(model_dir, fname)
         if self.shortlister is not None:
-            self.shortlister.load(os.path.join(model_dir, fname+'_ANN'))
+            self.shortlister.save(os.path.join(model_dir, fname+'_ANN'))
 
     def load(self, model_dir, fname, *args):
         """

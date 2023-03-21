@@ -27,12 +27,20 @@ def construct_loss(params, pos_weight=1.0):
             pad_ind=_pad_ind,
             pos_weight=None)
     elif params.loss == 'triplet_margin_ohnm':
-        return TripletMarginLossOHNM(
-            reduction=_reduction,
-            apply_softmax=params.loss_agressive,
-            tau=0.1,
-            k=params.loss_num_negatives,
-            margin=params.margin)
+        if params.loss_num_positives > 1:
+            return TripletMarginLossOHNMMulti(
+                reduction=_reduction,
+                num_negatives=params.loss_num_negatives,
+                num_positives=params.loss_num_positives,
+                margin=params.margin                
+            )
+        else:
+            return TripletMarginLossOHNM(
+                reduction=_reduction,
+                apply_softmax=params.loss_agressive,
+                tau=0.1,
+                k=params.loss_num_negatives,
+                margin=params.margin)
     elif params.loss == 'hinge_contrastive':
         return HingeContrastiveLoss(
             reduction=_reduction,
@@ -477,3 +485,76 @@ class kProbContrastiveLoss(_Loss):
             target > 0, loss, loss_neg)        
         loss = self._mask(loss, mask)
         return self._reduce(loss)
+    
+
+class TripletMarginLossOHNMMulti(_Loss):
+    r""" Triplet Margin Loss with Online Hard Negative Mining
+    * Applies loss using the hardest negative in the mini-batch
+    * Assumes diagonal entries are ground truth
+    Arguments:
+    ----------
+    reduction: string, optional (default='mean')
+        Specifies the reduction to apply to the output:
+        * 'none': no reduction will be applied
+        * 'mean' or 'sum': mean or sum of loss terms
+    """
+
+    def __init__(self, margin=1.0, eps=1.0e-6, reduction='mean',
+                 num_positives=3, num_negatives=10,
+                 num_violators=False, alpha=0.9):
+        super(TripletMarginLossOHNMMulti, self).__init__(reduction)
+        self.mx_lim = 100
+        self.mn_lim = -100
+        self.alpha = alpha
+        self._eps = eps
+        self._margin = margin
+        self._reduction = reduction
+        self.num_positives = num_positives
+        self.num_negatives = num_negatives
+        self.num_violators = num_violators
+
+    def forward(self, output, target, *args):
+        """
+        Arguments:
+        ---------
+        input: torch.FloatTensor
+            real number pred matrix of size: batch_size x output_size
+            cosine similarity b/w label and document
+        target:  torch.FloatTensor
+            0/1 ground truth matrix of size: batch_size x output_size
+        Returns:
+        -------
+        loss: torch.FloatTensor
+            dimension is defined based on reduction
+        """
+        B = target.size(0)
+        if target.size(0) != target.size(1):
+            MX_LIM = torch.full_like(output, self.mx_lim)
+            sim_p = output.where(target == 1, MX_LIM)
+            indices = sim_p.topk(largest=False, dim=1, k=self.num_positives)[1]
+            sim_p = sim_p.gather(1, indices)
+        else:
+            sim_p = output.diagonal().view(B, 1)
+        
+        MN_LIM = torch.full_like(output, self.mn_lim)
+        target = target.to(output.device)
+
+        _, num_p = sim_p.size()
+        sim_p = sim_p.view(B, num_p, 1)
+        sim_m = MN_LIM.where(target == 1, output)
+        indices = sim_m.topk(largest=True, dim=1, k=self.num_negatives)[1]
+        sim_n = output.gather(1, indices)
+        sim_n = sim_n.unsqueeze(1).repeat_interleave(num_p, dim=1)
+        loss = F.relu(sim_n - sim_p + self._margin)
+        prob = loss.clone()
+        prob.masked_fill_(prob == 0, self.mn_lim)
+        loss = F.softmax(prob, dim=-1)*loss
+        if (self._reduction == "mean"):
+            reduced_loss = loss.mean()
+        else:
+            reduced_loss = loss.sum()
+        if self.num_violators:
+            nnz = torch.sum((loss > 0), axis=1).float().mean()
+            return reduced_loss, nnz
+        else:
+            return reduced_loss
