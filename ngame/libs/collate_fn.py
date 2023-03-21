@@ -4,7 +4,7 @@ from torch.nn.utils.rnn import pad_sequence
 
 
 def clip_batch_lengths(ind, mask, max_len=1000000):
-    _max = min(np.max(np.sum(mask, axis=1)), max_len)
+    _max = min(torch.max(torch.sum(mask, dim=1)), max_len)
     return ind[:, :_max], mask[:, :_max]
 
 
