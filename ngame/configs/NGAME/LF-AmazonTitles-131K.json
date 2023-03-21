@@ -41,6 +41,7 @@
         "normalize": true,
         "margin": 0.3, 
         "optim": "AdamW",
+        "loss_num_positives": 1, 
         "loss_num_negatives": 10,
         "loss_agressive": true, 
         "init": "auto",
