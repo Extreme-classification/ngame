@@ -138,6 +138,7 @@ def run_ngame(work_dir, pipeline, version, seed, config):
 
     ##FIXME: For non-shared vocabulary
 
+    # model size of encoder will be counted down
     _train_time, _ = main(args)
     train_time += _train_time
 

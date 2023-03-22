@@ -8,6 +8,7 @@ from libs.batching import MySampler
 from xclib.utils.sparse import csr_from_arrays, normalize
 from tqdm import tqdm
 import logging
+import math
 
 
 def construct_model(args, net, loss, optimizer, schedular, shortlister):
@@ -1175,6 +1176,11 @@ class XModelIS(ModelIS):
     @property
     def model_size(self):
         s = self.net.model_size
+
+        # classifiers would be counted in shortlist (count only once)
+        offset = sum(p.numel() for p in self.net.classifier.parameters())
+        offset = (offset * 4) / math.pow(2, 20)
+
         if self.shortlister is not None:
-            return s + self.shortlister.model_size
-        return s
+            s += self.shortlister.model_size
+        return s - offset

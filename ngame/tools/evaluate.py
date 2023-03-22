@@ -82,7 +82,7 @@ def eval_with_score_fusion(tst_label_fname, trn_label_fname, trn_pred_fname,
     )
     predictions = f.predict(clf, knn, beta)
     args = acc.eval(predictions, 5)
-    ans = ans + f"\nbeta: {beta:.2f}\n{xc_metrics.format(*args)}"
+    ans = ans + f"\nfusion\n{xc_metrics.format(*args)}"
 
     if save:
         fname = os.path.join(root, f"score.npz")

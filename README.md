@@ -138,6 +138,7 @@ The algorithm can be run as follows. A json file (e.g., config/NGAME/LF-AmazonTi
 - [ ] Non-shared shortlist
 - [ ] Other negative-samplers
 - [x] tokenizer
+- [ ] Multi GPU Training
 
 ## Cite as
 
