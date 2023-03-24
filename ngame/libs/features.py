@@ -6,7 +6,7 @@ import numpy as np
 
 
 def construct(data_dir, fname, X=None, normalize=False,
-              _type='sparse', max_len=32):
+              _type='sparse', max_len=-1, **kwargs):
     """Construct feature class based on given parameters
     Arguments
     ----------
@@ -22,7 +22,7 @@ def construct(data_dir, fname, X=None, normalize=False,
         -sparse
         -dense
         -sequential
-    max_len: 32, optional, default=32
+    max_len: int, optional, default=-1
         max length in sequential features
     """
     if _type == 'sparse':
@@ -95,11 +95,22 @@ class SeqFeatures(SparseFeatures):
     def _type(self):
         return 'sequential'
 
+    @property
+    def _params(self):
+        return {'max_len': self.max_len,
+                'feature_type': self._type,
+                '_type': self._type}
+
 
 class DenseFeatures(_DenseFeatures):
     @property
     def _type(self):
         return 'dense'
+
+    @property
+    def _params(self):
+        return {'feature_type': self._type,
+                '_type': self._type}
 
 
 class _SparseFeatures(SparseFeatures):
@@ -130,3 +141,8 @@ class _SparseFeatures(SparseFeatures):
     @property
     def _type(self):
         return 'sparse'
+
+    @property
+    def _params(self):
+        return {'feature_type': self._type,
+                '_type': self._type}

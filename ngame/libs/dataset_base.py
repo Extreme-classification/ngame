@@ -285,13 +285,14 @@ class DatasetTensor(torch.utils.data.Dataset):
                  feature_indices=None,
                  normalize_features=True,
                  feature_type='sparse',
-                 *args, **kwargs):
+                 **kwargs):
         self.data = self.construct(
             data_dir, f_features, data, feature_indices,
-            normalize_features, feature_type)
+            normalize_features, feature_type, **kwargs)
 
-    def construct(self, data_dir, fname, data, indices, normalize, _type):
-        data = construct_f(data_dir, fname, data, normalize, _type)
+    def construct(self, data_dir, fname, data, indices,
+                  normalize, _type, **kwargs):
+        data = construct_f(data_dir, fname, data, normalize, _type, **kwargs)
         if indices is not None:
             indices = np.loadtxt(indices, dtype=np.int64)
             data._index_select(indices)

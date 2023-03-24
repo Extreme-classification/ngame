@@ -87,7 +87,8 @@ class ModelBase(object):
         max_len=-1,
         classifier_type='xc',
         precomputed_negatives=None,
-        surrogate_mapping=None):
+        surrogate_mapping=None,
+        **kwargs):
         """
         Create dataset as per given data and parameters
         Arguments
@@ -806,7 +807,8 @@ class ModelBase(object):
         indices=None,
         fname_out=None,
         use_intermediate=False,
-        feature_type='sparse'
+        feature_type='sparse', 
+        **kwargs
     ):
         """
         Encode given data points
@@ -848,7 +850,8 @@ class ModelBase(object):
             normalize_features=normalize,
             feature_type=feature_type,
             feature_indices=indices,
-            classifier_type=None)
+            classifier_type=None,
+            **kwargs)
         data_loader = DataLoader(
             dataset,
             batch_size=batch_size,

@@ -300,7 +300,7 @@ class SModelIS(ModelIS):
                         data=train_loader.dataset.features.data,
                         encoder=self.net.encode_document,
                         batch_size=train_loader.batch_sampler.batch_size,
-                        feature_type=train_loader.dataset.feature_type
+                        **train_loader.dataset.features._params
                         )
                 else:
                     _X = self.memory_bank
@@ -326,7 +326,7 @@ class SModelIS(ModelIS):
             if validation_loader is not None and epoch % validate_after == 0:
                 val_start_t = time.time()
                 predicted_labels, val_avg_loss = self._validate(
-                    train_loader, validation_loader, beta)
+                    train_loader, validation_loader)
                 val_end_t = time.time()
                 _acc = self.evaluate(
                     validation_loader.dataset.labels.data,
@@ -374,7 +374,7 @@ class SModelIS(ModelIS):
         validate=False,
         validate_after=20,
         batch_type='doc',
-        max_len=32,
+        max_len=-1,
         beta=0.2,
         *args, **kwargs
     ):
@@ -523,7 +523,7 @@ class SModelIS(ModelIS):
                 self.model_size))
         return train_time, self.model_size
 
-    def _validate(self, train_data_loader, data_loader, *args, **kwargs):
+    def _validate(self, train_data_loader, data_loader, **kwargs):
         self.net.eval()
         torch.set_grad_enabled(False)
         num_labels = data_loader.dataset.num_labels
@@ -532,14 +532,14 @@ class SModelIS(ModelIS):
             data=data_loader.dataset.features.data,
             encoder=self.net.encode_document,
             batch_size=data_loader.batch_sampler.batch_size,
-            feature_type=data_loader.dataset.feature_type
+            **data_loader.dataset.features._params
             )
         self.logger.info("Getting label embeddings")
         lbl_embeddings = self.get_embeddings(
             data=train_data_loader.dataset.label_features.data,
             encoder=self.net.encode_label,
             batch_size=data_loader.batch_sampler.batch_size,
-            feature_type=train_data_loader.dataset.feature_type
+            **train_data_loader.dataset.label_features._params
             )
         predicted_labels = {}
         predicted_labels['knn'] = predict_anns(
@@ -602,7 +602,7 @@ class XModelIS(ModelIS):
         """
         return beta*score_knn + (1-beta)*score_clf
 
-    def _validate(self, data_loader, beta=0.2, top_k=100):
+    def _validate(self, data_loader, top_k=100):
         """
         predict for the given data loader
         * retruns loss and predicted labels
@@ -627,7 +627,7 @@ class XModelIS(ModelIS):
             data=data_loader.dataset.features.data,
             encoder=self.net.encode_document,
             batch_size=data_loader.batch_sampler.batch_size,
-            feature_type=data_loader.dataset.feature_type
+            **data_loader.dataset.features._params
             )
         self.logger.info("Getting label embeddings")
         lbl_embeddings = self.net.get_clf_weights()
@@ -687,7 +687,7 @@ class XModelIS(ModelIS):
                         data=train_loader.dataset.features.data,
                         encoder=encoder,
                         batch_size=train_loader.batch_sampler.batch_size,
-                        feature_type=train_loader.dataset.feature_type
+                        **train_loader.dataset.features._params
                         )
                 else:
                     _X = self.memory_bank
@@ -715,7 +715,7 @@ class XModelIS(ModelIS):
             if validation_loader is not None and epoch % validate_after == 0:
                 val_start_t = time.time()
                 predicted_labels, val_avg_loss = self._validate(
-                    validation_loader, beta)
+                    validation_loader)
                 val_end_t = time.time()
                 _acc = self.evaluate(
                     validation_loader.dataset.labels.data,
@@ -744,7 +744,7 @@ class XModelIS(ModelIS):
             data=dataset.label_features.data,
             encoder=self.net._encode,
             batch_size=batch_size,
-            feature_type=dataset.feature_type
+            **dataset.label_features._params
             )
         self.net.initialize_classifier(
             np.vstack(
@@ -888,13 +888,13 @@ class XModelIS(ModelIS):
                 data=train_dataset.features.data,
                 encoder=self.net._encode,
                 batch_size=batch_size,
-                feature_type=train_dataset.feature_type
+                **train_dataset.features._params
             )
             data['Yf'] = self.get_embeddings(
                 data=train_dataset.label_features.data,
                 encoder=self.net._encode,
                 batch_size=batch_size,
-                feature_type=train_dataset.feature_type)
+                **train_dataset.label_features._params)
 
             data['Y'] = train_dataset.labels.data
             _train_dataset = train_dataset
@@ -987,15 +987,14 @@ class XModelIS(ModelIS):
             data=dataset.label_features.data,
             encoder=encoder,
             batch_size=batch_size,
-            feature_type=dataset.feature_type
+            **dataset.label_features._params
             )
         classifiers = self.net.get_clf_weights()
         self.logger.info("Training ANNS..")
         self.shortlister.fit(embeddings, classifiers)
         self.tracking.shortlist_time += (time.time() - start_time) 
 
-    def _predict(self, dataset, top_k, batch_size, num_workers, 
-                 beta):
+    def _predict(self, dataset, top_k, batch_size, num_workers, beta):
         """
         Predict for the given data_loader
         Arguments
@@ -1022,7 +1021,7 @@ class XModelIS(ModelIS):
             encoder=self.net.encode_document,
             batch_size=batch_size,
             num_workers=num_workers,
-            feature_type=dataset.feature_type
+            **dataset.features._params
             )
 
         self.logger.info("Querying ANNS..")

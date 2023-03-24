@@ -64,7 +64,8 @@ def construct_dataset(data_dir,
                       negative_sampler=None,
                       max_len=-1,
                       precomputed_negatives=None,
-                      surrogate_mapping=None):    
+                      surrogate_mapping=None,
+                      **kwargs):    
     try:
         sampling_type = sampling_params.type
         if sampling_type == 'brute':
