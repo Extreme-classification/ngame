@@ -5,11 +5,9 @@ work_dir=$(cd ../../../../ && pwd)
 data_dir="${work_dir}/data/${dataset}"
 
 # extract raw-text
-echo -e "Extracting raw text..\n"
+echo -e "Extracting raw text and labels..\n"
 
-python3 -W ignore ../tools/extract_raw_text.py "${data_dir}/trn.json.gz" "${data_dir}/trn.raw.txt"
-python3 -W ignore ../tools/extract_raw_text.py "${data_dir}/tst.json.gz" "${data_dir}/tst.raw.txt"
-python3 -W ignore ../tools/extract_raw_text.py "${data_dir}/lbl.json.gz" "${data_dir}/lbl.raw.txt"
+python3 -W ignore ../tools/extract_text_and_labels.py "${data_dir}" 
 
 # tokenize
 echo -e "Tokenizing..\n"

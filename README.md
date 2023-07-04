@@ -1,4 +1,4 @@
-# ngame
+# NGAME
 
 Code for _NGAME: Negative mining-aware mini-batching for extreme classification_ [1]
 
@@ -24,27 +24,14 @@ Code for _NGAME: Negative mining-aware mini-batching for extreme classification_
 ### Download data for NGAME
 
 ```txt
-* Download the (zipped file) BoW features and raw data from The XML repository [5].  
+* Download the (zipped file) raw data from The XML repository [5].  
 * Extract the zipped file into data directory. 
-* The following files should be available in <work_dir>/data/<dataset> for new datasets (ignore the next step)
+* The following files should be available in <work_dir>/data/<dataset> (create empty filter files if unavailable):
     - trn.json.gz
-    - trn_X_Y.txt
     - tst.json.gz
-    - tst_X_Y.txt
-    - tst.json.gz
+    - lbl.json.gz
     - filter_labels_text.txt
-* The following files would be available in <work_dir>/data/<dataset> if the dataset is in old format (please refer to next step to convert the data to new format)
-    - train.txt
-    - test.txt
-```
-
-### Convert to new data format (optional)
-
-```perl
-# A perl script is provided (in ngame/tools) to convert the data into new format
-# Either set the $data_dir variable to the data directory of a particular dataset or replace it with the path
-perl convert_format.pl $data_dir/train.txt $data_dir/trn_X_Xf.txt $data_dir/trn_X_Y.txt
-perl convert_format.pl $data_dir/test.txt $data_dir/tst_X_Xf.txt $data_dir/tst_X_Y.txt
+    - filter_labels_train.txt
 ```
 
 ## Example use cases
@@ -53,7 +40,7 @@ perl convert_format.pl $data_dir/test.txt $data_dir/tst_X_Xf.txt $data_dir/tst_X
 
 ### A single learner
 
-Tokenize data as follows.
+Extract and tokenize data as follows.
 
 ```bash
 ./prepare_data.sh LF-AmazonTitles-131K 32
@@ -77,15 +64,14 @@ The algorithm can be run as follows. A json file (e.g., config/NGAME/LF-AmazonTi
   - Tokenizer expects the following files in <work_dir>/data/<dataset>
     - trn.json.gz
     - tst.json.gz
-    - tst.json.gz
-  - it'll dump the following six tokenized files
+    - lbl.json.gz
+  - it'll dump the following six tokenized files 
     - trn_doc_input_ids.npy
     - trn_doc_attention_mask.npy
     - tst_doc_input_ids.npy
     - tst_doc_attention_mask.npy
     - lbl_input_ids.npy
     - lbl_attention_mask.npy
-
 
 * seq-len
   - sequence length of text to consider while tokenizing
