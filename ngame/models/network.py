@@ -253,7 +253,7 @@ class SiameseXMLIS(DeepXMLBase):
         torch.save(out, fname)
 
     def load_intermediate_model(self, fname):
-        out = pickle.load(open(fname, 'rb'))
+        out = torch.load(fname)
         if not self.share_weights:
             self.encoder.load_state_dict(out['encoder'])
             self.encoder_lbl.load_state_dict(out['encoder_lbl'])

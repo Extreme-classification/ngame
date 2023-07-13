@@ -117,7 +117,7 @@ The algorithm can be run as follows. A json file (e.g., config/NGAME/LF-AmazonTi
 
 - [x] Training encoders
 - [x] Training classifiers
-- [ ] Getting embeddings
+- [x] Getting embeddings
 - [x] Prediction
 - [x] Score-fusion
 - [ ] Other feature encoders

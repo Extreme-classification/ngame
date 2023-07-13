@@ -5,6 +5,7 @@ from libs.model import construct_model
 from libs.shortlist import construct_shortlister
 from libs.optim import construct_schedular, construct_optimizer
 from libs.loss import construct_loss
+import numpy as np
 
 
 def train(model, args):
@@ -84,6 +85,42 @@ def inference(model, args):
     return predicted_labels, prediction_time, avg_prediction_time
 
 
+def get_embeddings(model, args, _save=True):
+    """Compute embeddings of given file
+
+    Arguments
+    ----------
+    model: DeepXML
+        train this model (typically DeepXML model)
+    params: NameSpace
+        parameter of the model
+    """
+    fname = {
+        'f_features': args.feat_fname,
+        'f_label_features': None,
+        'f_labels': None}
+
+
+    embeddings = model.get_embeddings(
+        encoder=model.net.encode_document, # works for shared encoder for now
+        data_dir=os.path.join(args.data_dir, args.dataset),
+        fname=fname,
+        data=None,
+        num_workers=6,
+        feature_type=args.feature_type,
+        result_dir=args.result_dir,
+        model_dir=args.model_dir,
+        max_len=args.max_length,
+        fname_out=None,
+        use_intermediate=False,
+        batch_size=args.batch_size)
+    if _save:
+        np.save(
+            os.path.join(args.result_dir, args.fname_out),
+            embeddings)
+    return embeddings
+
+
 def initialize(args, net):
     if args.init == 'intermediate':
         print("Loading intermediate representation.")
@@ -126,7 +163,9 @@ def main(args):
         model.load(args.model_dir, args.model_fname)
         output = inference(model, args)
     elif args.mode == 'encode':
-        pass
+        model = construct_model(args, net, None, None, None, shortlister)
+        model.load(args.model_dir, args.model_fname)
+        output = get_embeddings(model, args)
     else:
         raise NotImplementedError("")
     return output

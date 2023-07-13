@@ -783,7 +783,7 @@ class ModelBase(object):
                 self.net.representation_dims),
                 dtype=_dtype)
         count = 0
-        for batch_data in tqdm(data_loader):
+        for batch_data in tqdm(data_loader, desc="Computing Embeddings"):
             batch_size = batch_data['batch_size']
             out_ans = encoder(
                 batch_data['X'], use_intermediate)

@@ -142,6 +142,18 @@ def run_ngame(work_dir, pipeline, version, seed, config):
     _train_time, _ = main(args)
     train_time += _train_time
 
+    # get embeddings for documents and labels
+    # args.init = 'intermediate'
+    # args.mode = 'encode'
+    # args.feat_fname = g_config["lbl_feat_fname"]
+    # args.fname_out = "lbl.ngame.npy"
+    # main(args)
+
+    # args.feat_fname = g_config["tst_feat_fname"]
+    # args.fname_out = "tst.ngame.npy"
+    # main(args)
+
+
     # set up things to train extreme classifiers
     _args.update(config['extreme'])
     args = _args.params
